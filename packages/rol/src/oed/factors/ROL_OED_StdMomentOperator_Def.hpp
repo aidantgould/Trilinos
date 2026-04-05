@@ -10,8 +10,7 @@
 #ifndef ROL_OED_STD_COVARIANCE_OPERATOR_DEF_HPP
 #define ROL_OED_STD_COVARIANCE_OPERATOR_DEF_HPP
 
-namespace ROL {
-namespace OED {
+namespace ROL::OED {
 
 template<typename Real>
 void StdMomentOperator<Real>::initialize(int nfactors) {
@@ -52,7 +51,7 @@ void StdMomentOperator<Real>::build(const Vector<Real> &p) {
     if (isPset_) blas_->AXPY(nfactors*nfactors,one,P_.values(),1,M_.values(),1);
     isBuilt_      = true;
     isFactorized_ = false;
-    useSVD_       = false;
+    useSVD_       = alwaysUseSVD_;
   }
   stopTimer("build");
 }
@@ -63,26 +62,30 @@ void StdMomentOperator<Real>::factorize(const Vector<Real> &p) {
   if (isBuilt_) {
     if (!isFactorized_) {
       const int nfactors = M_.numRows();
-      Minv_.assign(M_);
       int info;
-      // Factorize matrix
-      lapack_->POTRF('U',nfactors,Minv_.values(),nfactors,&info);
-      if (info != 0) {
-        useSVD_ = true;
-        //std::stringstream ss;
-        //ss << ">>> OED::StdMomentOperator::factorize : "
-        //   << "POTRF exited with INFO equal to " << info << "!" << std::endl
-        //   << "  < 0: if INFO = -i, the i-th argument had an illegal value" << std::endl
-        //   << "  > 0: if INFO = i, the leading minor of order i is not positive definite";
-        //throw Exception::NotImplemented(ss.str());
+      if (!alwaysUseSVD_) {
+        Minv_.assign(M_);
+        // Factorize matrix
+        lapack_->POTRF('U',nfactors,Minv_.values(),nfactors,&info);
+        if (info != 0) {
+          useSVD_ = true;
+          //std::stringstream ss;
+          //ss << ">>> OED::StdMomentOperator::factorize : "
+          //   << "POTRF exited with INFO equal to " << info << "!" << std::endl
+          //   << "  < 0: if INFO = -i, the i-th argument had an illegal value" << std::endl
+          //   << "  > 0: if INFO = i, the leading minor of order i is not positive definite";
+          //throw Exception::NotImplemented(ss.str());
+        }
       }
-      if (useSVD_) {
+      if (useSVD_ || alwaysUseSVD_) {
         Minv_.assign(M_);
         int lwork = -1;
-        std::vector<Real> work(1), rwork(5*nfactors);
-        lapack_->GESVD('A','A',nfactors,nfactors,Minv_.values(),nfactors,
-                       &sval_[0],U_.values(),nfactors,V_.values(),nfactors,
-                       &work[0],lwork,&rwork[0],&info);
+        std::vector<Real> work(1); //, rwork(5*nfactors);
+        //lapack_->GESVD('A','A',nfactors,nfactors,Minv_.values(),nfactors,
+        //               &sval_[0],U_.values(),nfactors,V_.values(),nfactors,
+        //               &work[0],lwork,&rwork[0],&info);
+        lapack_->SYEV('V','U',nfactors,Minv_.values(),nfactors,
+                       &sval_[0],&work[0],lwork,&info);
         if (info != 0) {
           std::stringstream ss;
           ss << ">>> OED::StdMomentOperator::factorize : "
@@ -95,9 +98,11 @@ void StdMomentOperator<Real>::factorize(const Vector<Real> &p) {
         }
         lwork = work[0];
         work.resize(lwork); work.assign(lwork,static_cast<Real>(0));
-        lapack_->GESVD('A','A',nfactors,nfactors,Minv_.values(),nfactors,
-                       &sval_[0],U_.values(),nfactors,V_.values(),nfactors,
-                       &work[0],lwork,&rwork[0],&info);
+        //lapack_->GESVD('A','A',nfactors,nfactors,Minv_.values(),nfactors,
+        //               &sval_[0],U_.values(),nfactors,V_.values(),nfactors,
+        //               &work[0],lwork,&rwork[0],&info);
+        lapack_->SYEV('V','U',nfactors,Minv_.values(),nfactors,
+                       &sval_[0],&work[0],lwork,&info);
         if (info != 0) {
           std::stringstream ss;
           ss << ">>> OED::StdMomentOperator::factorize : "
@@ -140,12 +145,14 @@ const std::vector<Real>& StdMomentOperator<Real>::getConstData(const Vector<Real
 template<typename Real>
 StdMomentOperator<Real>::StdMomentOperator(RegressionType regType,
                   bool homNoise,
-                  const Ptr<Noise<Real>> &noise)
+                  const Ptr<Noise<Real>> &noise,
+                  bool alwaysUseSVD, Real SVDtol)
   : MomentOperator<Real>(regType,homNoise,noise),
     lapack_(makePtr<LAPACK<int,Real>>()),
     blas_(makePtr<Teuchos::BLAS<int,Real>>()),
     isBuilt_(false), isFactorized_(false), isSet_(false),
-    isFullSet_(false), useSVD_(false), isPset_(false) {
+    isFullSet_(false), useSVD_(false), isPset_(false),
+    alwaysUseSVD_(alwaysUseSVD), SVDtol_(SVDtol) {
   ProfiledClass<Real,std::string>::rename("OED::StdMomentOperator");
 }
 
@@ -155,7 +162,9 @@ Ptr<MomentOperator<Real>> StdMomentOperator<Real>::clone() const {
   bool hom;
   Ptr<Noise<Real>> noise;
   MomentOperator<Real>::getRegressionInfo(type,hom,noise);
-  return makePtr<StdMomentOperator<Real>>(type,hom,noise);
+  auto M = makePtr<StdMomentOperator<Real>>(type,hom,noise,alwaysUseSVD_,SVDtol_);
+  if (isPset_) M->setPerturbation(MomentOperator<Real>::getPerturbation());
+  return M;
 }
 
 template<typename Real>
@@ -183,7 +192,7 @@ void StdMomentOperator<Real>::applyInverse(Vector<Real> &Mx,
     const int nfactors = M_.numRows();
     int info;
 
-    if (!useSVD_) {
+    if (!useSVD_ && !alwaysUseSVD_) {
       // Solve triangular systems
       lapack_->POTRS('U',nfactors,1,Minv_.values(),nfactors,
                      &Mxdata[0],nfactors,&info);
@@ -211,22 +220,23 @@ void StdMomentOperator<Real>::applyInverse(Vector<Real> &Mx,
     else {
       const Real zero(0), one(1);
       std::vector<Real> Ux(nfactors);
-      blas_->GEMV(Teuchos::TRANS,nfactors,nfactors,one,U_.values(),nfactors,
+      //blas_->GEMV(Teuchos::TRANS,nfactors,nfactors,one,U_.values(),nfactors,
+      //            &xdata[0],1,zero,&Ux[0],1);
+      blas_->GEMV(Teuchos::TRANS,nfactors,nfactors,one,Minv_.values(),nfactors,
                   &xdata[0],1,zero,&Ux[0],1);
       Real maxSV(-1);
-      for (int i = 0; i < nfactors; ++i) {
+      for (int i = 0; i < nfactors; ++i)
         maxSV = (maxSV < sval_[i] ? sval_[i] : maxSV);
-      }
-      const Real tol = ROL_EPSILON<Real>()*static_cast<Real>(nfactors) * maxSV;
+      const Real tol = SVDtol_ * maxSV; // * static_cast<Real>(nfactors);
       for (int i = 0; i < nfactors; ++i) {
-        if (sval_[i] > tol) {
+        if (sval_[i] > tol)
           Ux[i] /= sval_[i];
-        }
-        else {
+        else
           Ux[i] = zero;
-        }
       }
-      blas_->GEMV(Teuchos::TRANS,nfactors,nfactors,one,V_.values(),nfactors,
+      //blas_->GEMV(Teuchos::TRANS,nfactors,nfactors,one,V_.values(),nfactors,
+      //            &Ux[0],1,zero,&Mxdata[0],1);
+      blas_->GEMV(Teuchos::NO_TRANS,nfactors,nfactors,one,Minv_.values(),nfactors,
                   &Ux[0],1,zero,&Mxdata[0],1);
     }
   }
@@ -390,8 +400,19 @@ Real StdMomentOperator<Real>::logDeterminant(const Vector<Real> &z) {
     build(z);
     factorize(z);
     const int nfactors = M_.numRows();
-    for (int j = 0; j < nfactors; ++j) {
-      val += std::log(!useSVD_ ? Minv_(j,j) : sval_[j]);
+    if (useSVD_) {
+      Real maxSV(-1);
+      for (int i = 0; i < nfactors; ++i)
+        maxSV = (maxSV < sval_[i] ? sval_[i] : maxSV);
+      const Real tol = SVDtol_ * maxSV; // * static_cast<Real>(nfactors);
+      for (int j = 0; j < nfactors; ++j) {
+        if (sval_[j] >= tol) val += std::log(sval_[j]);
+      }
+    }
+    else {
+      for (int j = 0; j < nfactors; ++j) {
+        val += std::log(Minv_(j,j));
+      }
     }
   }
   else {
@@ -407,7 +428,6 @@ Real StdMomentOperator<Real>::logDeterminant(const Vector<Real> &z) {
   return val;
 }
 
-} // End OED Namespace
-} // End ROL Namespace
+} // End ROL::OED Namespace
 
 #endif
