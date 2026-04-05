@@ -66,12 +66,10 @@ struct KokkosSliceToMDSpanSliceImpl {
 };
 
 template <>
-struct KokkosSliceToMDSpanSliceImpl<Kokkos::ALL_t> {
+struct KokkosSliceToMDSpanSliceImpl<ALL_t> {
   using type = full_extent_t;
   KOKKOS_FUNCTION
-  static constexpr decltype(auto) transform(Kokkos::ALL_t) {
-    return full_extent;
-  }
+  static constexpr decltype(auto) transform(ALL_t) { return full_extent; }
 };
 
 template <class T>

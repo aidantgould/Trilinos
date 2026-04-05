@@ -95,12 +95,6 @@ void test_left_stride(Extents... extents) {
     expected_stride *= view.extent(i);
   }
   ASSERT_EQ(all_strides[view_type::rank()], expected_stride);
-#ifdef KOKKOS_ENABLE_DEPRECATED_CODE_4
-  for (size_t i = view_type::rank(); i < size_t(8); ++i) {
-    ASSERT_EQ(view.stride(i), view.stride(view_type::rank() - 1) *
-                                  view.extent(view_type::rank() - 1));
-  }
-#endif
 }
 
 template <typename DataType, typename... Extents>
@@ -118,11 +112,6 @@ void test_right_stride(Extents... extents) {
     expected_stride *= view.extent(i);
   }
   ASSERT_EQ(all_strides[view_type::rank()], expected_stride);
-#ifdef KOKKOS_ENABLE_DEPRECATED_CODE_4
-  for (size_t i = view_type::rank(); i < size_t(8); ++i) {
-    ASSERT_EQ(view.stride(i), size_t(1));
-  }
-#endif
 }
 
 template <typename DataType, typename... Extents>
@@ -148,11 +137,6 @@ void test_stride_stride(Extents... extents) {
     }
     ASSERT_EQ(all_strides[view_type::rank()],
               max_stride * view.extent(max_stride_idx));
-#ifdef KOKKOS_ENABLE_DEPRECATED_CODE_4
-    for (size_t i = view_type::rank(); i < size_t(8); ++i) {
-      ASSERT_EQ(view.stride(i), size_t(0));
-    }
-#endif
   };
 
   Kokkos::View<DataType, Kokkos::LayoutRight, Kokkos::HostSpace> view_right(

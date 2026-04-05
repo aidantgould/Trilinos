@@ -34,11 +34,6 @@ struct ParallelReduceTag {};
 struct ChunkSize {
   int value;
   explicit ChunkSize(int value_) : value(value_) {}
-#ifdef KOKKOS_ENABLE_DEPRECATED_CODE_4
-  template <typename T = void>
-  KOKKOS_DEPRECATED_WITH_COMMENT("ChunkSize should be constructed explicitly.")
-  ChunkSize(int value_) : value(value_) {}
-#endif
 };
 
 namespace Impl {
@@ -181,15 +176,6 @@ class RangePolicy : public Impl::PolicyTraits<Properties...> {
   }
 
  public:
-#ifdef KOKKOS_ENABLE_DEPRECATED_CODE_4
-  KOKKOS_DEPRECATED_WITH_COMMENT("Use set_chunk_size instead")
-  inline void set(ChunkSize chunksize) {
-    m_granularity      = chunksize.value;
-    m_granularity_mask = m_granularity - 1;
-  }
-#endif
-
- public:
   /** \brief return chunk_size */
   inline member_type chunk_size() const { return m_granularity; }
 
@@ -251,14 +237,7 @@ class RangePolicy : public Impl::PolicyTraits<Properties...> {
                         std::to_string(m_begin) +
                         ") is greater than the upper bound (" +
                         std::to_string(m_end) + ").\n";
-#ifndef KOKKOS_ENABLE_DEPRECATED_CODE_4
       Kokkos::abort(msg.c_str());
-#endif
-      m_begin = 0;
-      m_end   = 0;
-#ifdef KOKKOS_ENABLE_DEPRECATION_WARNINGS
-      Kokkos::Impl::log_warning(msg);
-#endif
     }
   }
 
@@ -267,44 +246,35 @@ class RangePolicy : public Impl::PolicyTraits<Properties...> {
   static void check_conversion_safety([[maybe_unused]] const IndexType bound) {
     // Checking that the round-trip conversion preserves input index value
     if constexpr (std::is_convertible_v<member_type, IndexType>) {
-#if !defined(KOKKOS_ENABLE_DEPRECATED_CODE_4) || \
-    defined(KOKKOS_ENABLE_DEPRECATION_WARNINGS)
-      bool warn = false;
+      bool error = false;
 
       if constexpr (std::is_arithmetic_v<member_type> &&
                     (std::is_signed_v<IndexType> !=
                      std::is_signed_v<member_type>)) {
         // check signed to unsigned
         if constexpr (std::is_signed_v<IndexType>)
-          warn |= (bound < static_cast<IndexType>(
-                               std::numeric_limits<member_type>::min()));
+          error |= (bound < static_cast<IndexType>(
+                                std::numeric_limits<member_type>::min()));
 
         // check unsigned to signed
         if constexpr (std::is_signed_v<member_type>)
-          warn |= (bound > static_cast<IndexType>(
-                               std::numeric_limits<member_type>::max()));
+          error |= (bound > static_cast<IndexType>(
+                                std::numeric_limits<member_type>::max()));
       }
 
       // check narrowing
-      warn |=
+      error |=
           (static_cast<IndexType>(static_cast<member_type>(bound)) != bound);
 
-      if (warn) {
+      if (error) {
         std::string msg =
             "Kokkos::RangePolicy bound type error: an unsafe implicit "
             "conversion is performed on a bound (" +
             std::to_string(bound) +
             "), which may not preserve its original value.\n";
 
-#ifndef KOKKOS_ENABLE_DEPRECATED_CODE_4
         Kokkos::abort(msg.c_str());
-#endif
-
-#ifdef KOKKOS_ENABLE_DEPRECATION_WARNINGS
-        Kokkos::Impl::log_warning(msg);
-#endif
       }
-#endif
     }
   }
 

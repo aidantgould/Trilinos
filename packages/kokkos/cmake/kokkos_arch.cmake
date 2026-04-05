@@ -1470,7 +1470,7 @@ endif()
 #Let's just always print things
 message(STATUS "Built-in Execution Spaces:")
 
-foreach(_BACKEND Cuda HIP SYCL OpenACC)
+foreach(_BACKEND Cuda HIP SYCL OpenACC NextSilicon)
   string(TOUPPER ${_BACKEND} UC_BACKEND)
   if(KOKKOS_ENABLE_${UC_BACKEND})
     if(_DEVICE_PARALLEL)
@@ -1483,15 +1483,6 @@ foreach(_BACKEND Cuda HIP SYCL OpenACC)
       )
     endif()
     if(${_BACKEND} STREQUAL "Cuda")
-      if(KOKKOS_ENABLE_CUDA_UVM)
-        message(
-          DEPRECATION
-            "Setting Kokkos_ENABLE_CUDA_UVM is deprecated - use the portable Kokkos::SharedSpace as an explicit memory space in your code instead"
-        )
-        if(NOT KOKKOS_ENABLE_DEPRECATED_CODE_4)
-          message(FATAL_ERROR "Kokkos_ENABLE_DEPRECATED_CODE_4 must be set to use Kokkos_ENABLE_CUDA_UVM")
-        endif()
-      endif()
       set(_DEVICE_PARALLEL "Kokkos::${_BACKEND}")
     elseif(${_BACKEND} STREQUAL "HIP" OR ${_BACKEND} STREQUAL "SYCL")
       set(_DEVICE_PARALLEL "Kokkos::${_BACKEND}")

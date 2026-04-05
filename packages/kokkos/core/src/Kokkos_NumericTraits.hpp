@@ -9,9 +9,7 @@
 #endif
 
 #include <Kokkos_Macros.hpp>
-#ifdef KOKKOS_ENABLE_DEPRECATED_CODE_4
-#include <Kokkos_ReductionIdentity.hpp>
-#endif
+
 #include <type_traits>
 #include <limits>
 

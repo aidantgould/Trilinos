@@ -95,33 +95,6 @@ void HPX::print_configuration(std::ostream &os, const bool) const {
   os << hpx::configuration_string() << '\n';
 }
 
-#ifdef KOKKOS_ENABLE_DEPRECATED_CODE_4
-bool &HPX::impl_get_in_parallel() noexcept {
-  static thread_local bool in_parallel = false;
-  return in_parallel;
-}
-
-HPX::impl_in_parallel_scope::impl_in_parallel_scope() noexcept {
-  KOKKOS_EXPECTS(!impl_get_in_parallel());
-  impl_get_in_parallel() = true;
-}
-
-HPX::impl_in_parallel_scope::~impl_in_parallel_scope() noexcept {
-  KOKKOS_EXPECTS(impl_get_in_parallel());
-  impl_get_in_parallel() = false;
-}
-
-HPX::impl_not_in_parallel_scope::impl_not_in_parallel_scope() noexcept {
-  KOKKOS_EXPECTS(impl_get_in_parallel());
-  impl_get_in_parallel() = false;
-}
-
-HPX::impl_not_in_parallel_scope::~impl_not_in_parallel_scope() noexcept {
-  KOKKOS_EXPECTS(!impl_get_in_parallel());
-  impl_get_in_parallel() = true;
-}
-#endif
-
 void HPX::impl_decrement_active_parallel_region_count() {
   std::unique_lock<hpx::spinlock> l(m_active_parallel_region_count_mutex);
   if (--m_active_parallel_region_count == 0) {
@@ -169,11 +142,7 @@ void HPX::impl_static_fence(const std::string &name) {
       });
 }
 
-#ifdef KOKKOS_ENABLE_DEPRECATED_CODE_4
-int HPX::concurrency() {
-#else
 int HPX::concurrency() const {
-#endif
   hpx::runtime *rt = hpx::get_runtime_ptr();
   if (rt == nullptr) {
     return hpx::threads::hardware_concurrency();

@@ -99,35 +99,16 @@ class Serial {
   //@}
 
   KOKKOS_DEFAULTED_FUNCTION Serial(const Serial&) = default;
-  KOKKOS_FUNCTION Serial(Serial&& other)
+  KOKKOS_FUNCTION Serial(Serial&& other) noexcept
       : Serial(static_cast<const Serial&>(other)) {}
   KOKKOS_DEFAULTED_FUNCTION Serial& operator=(const Serial&) = default;
-  KOKKOS_FUNCTION Serial& operator=(Serial&& other) {
+  KOKKOS_FUNCTION Serial& operator=(Serial&& other) noexcept {
     return *this = static_cast<const Serial&>(other);
   }
   ~Serial();
   Serial();
 
   explicit Serial(NewInstance);
-
-#ifdef KOKKOS_ENABLE_DEPRECATED_CODE_4
-  template <typename T = void>
-  KOKKOS_DEPRECATED_WITH_COMMENT(
-      "Serial execution space should be constructed explicitly.")
-  Serial(NewInstance)
-      : Serial(NewInstance{}) {}
-#endif
-
-  /// \brief True if and only if this method is being called in a
-  ///   thread-parallel function.
-  ///
-  /// For the Serial device, this method <i>always</i> returns false,
-  /// because parallel_for or parallel_reduce with the Serial device
-  /// always execute sequentially.
-
-#ifdef KOKKOS_ENABLE_DEPRECATED_CODE_4
-  KOKKOS_DEPRECATED inline static int in_parallel() { return false; }
-#endif
 
   /// \brief Wait until all dispatched functors complete.
   ///
@@ -168,11 +149,7 @@ class Serial {
   }
 
   /** \brief  Return the maximum amount of concurrency.  */
-#ifdef KOKKOS_ENABLE_DEPRECATED_CODE_4
-  static int concurrency() { return 1; }
-#else
   int concurrency() const { return 1; }
-#endif
 
   //! Print configuration information to the given output stream.
   void print_configuration(std::ostream& os, bool verbose = false) const;
