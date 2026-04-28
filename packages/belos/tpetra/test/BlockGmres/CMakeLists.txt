@@ -74,6 +74,14 @@ TRIBITS_ADD_EXECUTABLE_AND_TEST(
   )
 
 TRIBITS_ADD_EXECUTABLE_AND_TEST(
+  Tpetra_BlockGMRES_ritz_pairs_test
+  SOURCES test_bl_gmres_ritz_pairs.cpp
+  ARGS "--verbose"
+  COMM serial mpi
+  STANDARD_PASS_OUTPUT
+  )
+
+TRIBITS_ADD_EXECUTABLE_AND_TEST(
   Tpetra_HybridGMRES_hb_test
   SOURCES test_hybrid_gmres_hb.cpp
   ARGS "--verbose --max-degree=10 --poly-type=Arnoldi"
