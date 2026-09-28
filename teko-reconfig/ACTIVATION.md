@@ -164,3 +164,22 @@ mode — isn't among the candidates).
 All wall times in `conv.json`/`solved.json` are the cross-rank maximum
 (critical path), so they're identical on every rank and time-based selection
 is deterministic.
+
+## Residuals and the `converged` flag
+
+`final_residual` in both `conv.json` and `solved.json` is the **explicitly
+recomputed** relative residual `||b - A x|| / ||b||`, not Belos's
+`achievedTol()`. Likewise `converged` requires both `Belos::Converged` and that
+recomputed residual being within `kResidualSlack` of the solver tolerance.
+
+This matters because Belos judges convergence from its recursively updated
+(implicit) residual estimate, and cannot be asked for an explicit test here:
+`BlockGmresSolMgr` forces the implicit test whenever `"Flexible Gmres"` is on,
+and setting `"Explicit Residual Test"` switches off the flexible iterator this
+hook requires. Since each block inverse is an inexact inner GMRES solve, the
+preconditioner is non-stationary and that estimate can cross the tolerance while
+the true residual does not. A candidate that converges falsely stops early, so
+left unchecked it would report `converged` with a low iteration count, a small
+residual and a short iterate time, winning every tiebreaker in both `best_conv`
+and `best_time`. The bias also grows with merging, since a merged group is
+larger and less well conditioned than the singletons it replaces.

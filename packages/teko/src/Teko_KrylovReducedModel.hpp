@@ -54,7 +54,7 @@ namespace KrylovSurrogate {
 // TpetraLinearOp/CrsMatrix below match whatever node/ordinals the build uses
 // (Serial, OpenMP, CUDA, a different GO, ...) instead of silently returning
 // null on a mismatched build. (GPU nodes additionally need host-accessible
-// data for the getData() loops here — see INTERFACE_AND_HPC_ISSUES.md.)
+// data for the getData() loops here.)
 using SC   = double;
 using LO   = Tpetra::Map<>::local_ordinal_type;
 using GO   = Tpetra::Map<>::global_ordinal_type;
@@ -88,6 +88,20 @@ inline Teuchos::RCP<const TpetraMV> getBlockTpetraMV(
         " is not a TpetraMultiVector");
 
     return tmv->getConstTpetraMultiVector();
+}
+
+// Block (i,j) of A_blocked as a Tpetra CrsMatrix, or null when the block is
+// absent or is not a Tpetra CRS operator.
+inline Teuchos::RCP<const Tpetra::CrsMatrix<SC, LO, GO, Node>> getBlockAsCrs(
+    Teuchos::RCP<const Thyra::BlockedLinearOpBase<SC>> A_blocked, int i, int j)
+{
+    auto blk = A_blocked->getBlock(i, j);
+    if (blk.is_null()) return Teuchos::null;
+    auto lo = Teuchos::rcp_dynamic_cast<
+        const Thyra::TpetraLinearOp<SC, LO, GO, Node>>(blk);
+    if (lo.is_null()) return Teuchos::null;
+    return Teuchos::rcp_dynamic_cast<const Tpetra::CrsMatrix<SC, LO, GO, Node>>(
+        lo->getConstTpetraOperator());
 }
 
 // C := A^T B as a replicated SerialDenseMatrix (numVecs(A) × numVecs(B)).
@@ -138,24 +152,43 @@ struct CHatData {
     std::vector<SDM>               b_hat;
 };
 
-// Reduced basis of one Krylov block — the core "reduced model" construction.
-// From the thin SVD V_j = Q_j Sigma_j W_j^T, obtained via the Gram matrix
-// G_j = V_j^T V_j (eigendecomposition) WITHOUT ever forming the distributed
-// Q_j. Holds the truncated rank r_j, the leading r_j singular values
-// (descending), and the right singular vectors W_j (curDim × r_j). b_hat_j and
-// the reduced operator blocks C_hat_{ij} are projections onto this basis.
+// Reduced basis of one sampled block — the core "reduced model" construction.
+// From the thin SVD V_tilde_j = Q_j Sigma_j W_j^T (paper eq 3.9), obtained via
+// the Gram matrix G_j = V_tilde_j^T V_tilde_j (eigendecomposition) WITHOUT ever
+// forming the distributed Q_j. Holds the truncated rank r_j, the leading r_j
+// singular values (descending), and the right singular vectors W_j
+// (curDim × r_j). b_hat_j and the reduced operator blocks C_hat_{ij} are
+// projections onto this basis.
 struct BlockReduction {
     int             rank = 0;   // r_j
     std::vector<SC> sigma;      // length r_j, descending singular values
     SDM             W;          // curDim × r_j, right singular vectors
 };
 
-// Build the reduced basis of Krylov block Vj (using its first curDim columns).
-// svd_tol truncates singular values relative to the largest. Collective —
+// Smallest singular-value ratio the Gram-matrix route can resolve, and
+// therefore the truncation threshold used here.
+//
+// The paper's rule is sigma_i >= 1e-10 * sigma_max (eq 3.10), and pyautoteko's
+// reduce_Z uses rank_tol * eps_mach = 2.2e-10. Neither is reachable through
+// G_j = V_tilde_j^T V_tilde_j: forming the Gram matrix squares the condition
+// number, so a direction with sigma/sigma_max = t shows up in G_j at
+// lambda/lambda_max = t^2, and anything with t below sqrt(8 eps_mach) is buried
+// in the roundoff of lambda_max. Any requested tolerance at or below this floor
+// therefore produces identical results, which is why the floor is named here
+// instead of being passed in as a tolerance that looks like it does something.
+//
+// The consequence is deliberate and one-sided: this retains FEWER directions
+// than the paper does, and each retained direction carries less amplified
+// roundoff (a direction kept at ratio t costs about eps_mach/t relative error in
+// its column of C_hat). Reaching 1e-10 would mean forming Q_j explicitly with a
+// distributed tall-skinny QR instead of going through G_j.
+constexpr double kGramSigmaFloor = 4.2146848510894035e-08;  // sqrt(8 * eps_mach)
+
+// Build the reduced basis of block Vj (using its first curDim columns), where
+// Vj is V_tilde_j = A_jj Z_j. svd_tol truncates singular values relative to the
+// largest, and is clamped from below by kGramSigmaFloor. Collective —
 // mvTransMv does a local GEMM + Allreduce, so the small dense eigenproblem and
-// its truncation are identical on every rank (no broadcasts). See the
-// numerical caveat on computeCHat about squaring the condition number via the
-// Gram matrix.
+// its truncation are identical on every rank (no broadcasts).
 inline BlockReduction reduceKrylovBlock(const TpetraMV& Vj, int curDim, double svd_tol)
 {
     Teuchos::LAPACK<int, SC> lapack;
@@ -177,16 +210,15 @@ inline BlockReduction reduceKrylovBlock(const TpetraMV& Vj, int curDim, double s
         "Teko::KrylovSurrogate::reduceKrylovBlock: SYEV failed (info=" +
         std::to_string(info) + ")");
 
-    // Truncate against the leading eigenvalue. sigma_k >= svd_tol*sigma_max on
-    // singular values is lambda_k >= svd_tol^2*lambda_max on G_j's eigenvalues
-    // (lambda_k = sigma_k^2). The threshold is floored at a few ulps of
-    // lambda_max: eigenvalues below that are roundoff noise (directions with
-    // sigma <~ sqrt(eps)*sigma_max cannot be resolved through the Gram
-    // matrix), and keeping one would inject an O(1/sigma) garbage direction.
-    const SC eps        = std::numeric_limits<SC>::epsilon();
+    // Truncate against the leading eigenvalue. A cut at sigma_k >= t*sigma_max
+    // on singular values is lambda_k >= t^2*lambda_max on G_j's eigenvalues,
+    // since lambda_k = sigma_k^2. t is clamped up to kGramSigmaFloor because
+    // below that the eigenvalue test is comparing against the roundoff of
+    // lambda_max, and keeping such a direction would inject an O(1/sigma)
+    // garbage column into C_hat.
+    const SC t          = std::max(svd_tol, kGramSigmaFloor);
     const SC lambda_max = eig[curDim - 1];
-    const SC threshold  = (lambda_max > 0.0
-        ? std::max(svd_tol * svd_tol, 8.0 * eps) * lambda_max : 0.0);
+    const SC threshold  = (lambda_max > 0.0 ? t * t * lambda_max : 0.0);
     int rj = 0;
     while (rj < curDim && eig[curDim - 1 - rj] >= threshold) ++rj;
     if (rj == 0) rj = 1;  // keep at least one direction
@@ -206,44 +238,46 @@ inline BlockReduction reduceKrylovBlock(const TpetraMV& Vj, int curDim, double s
 }
 
 // Compute C_hat from the final FGMRES state.
-//   state      — from BlockFGmresIter::getState() after convergence
+//   state      — from BlockFGmresIter::getState(); only Z and curDim are used
 //   A_blocked  — the blocked system operator
 //   b          — the right-hand side of the linear system (for b_hat = Q^T b)
 //   block_sizes — sizes of each block
-//   svd_tol    — truncation threshold relative to leading singular value
+//   svd_tol    — truncation threshold relative to leading singular value,
+//                clamped up to kGramSigmaFloor
 //
-// Multi-rank (Gram-matrix) formulation. The mathematical definitions are
-// unchanged from the GESVD version:
+// The basis is sampled from a forward multiply, V_tilde_j := A_jj Z_j (paper
+// eq 3.3), NOT from the FGMRES basis state.V. See the comment at the forward
+// multiply below for why.
 //
-//   V_j = Q_j Sigma_j W_j^T  (thin SVD),
-//   C_hat_{ij} = Q_{i,ri}^T A_{ij} Z_j W_{j,rj} Sigma_{j,rj}^{-1},
+//   V_tilde_j = Q_j Sigma_j W_j^T  (thin SVD, eq 3.9),
+//   C_hat_{ij} = Q_{i,ri}^T A_{ij} Z_j W_{j,rj} Sigma_{j,rj}^{-1}   (eq 3.18),
 //   b_hat_j    = Q_{j,rj}^T b_j,
 //
-// but Q_j (problem-sized, distributed) is eliminated via
-// Q_j = V_j W_j Sigma_j^{-1}, leaving only small replicated quantities:
+// Multi-rank (Gram-matrix) formulation: Q_j (problem-sized, distributed) is
+// eliminated via Q_j = V_tilde_j W_j Sigma_j^{-1}, leaving only small replicated
+// quantities:
 //
-//   G_j   := V_j^T V_j = W_j Sigma_j^2 W_j^T   (curDim × curDim, SPD)
+//   G_j   := V_tilde_j^T V_tilde_j = W_j Sigma_j^2 W_j^T  (curDim × curDim, SPD)
 //     → SYEV eigendecomposition gives W_j and sigma_{j,k} = sqrt(lambda_{j,k})
-//   b_hat_j    = Sigma_{j,rj}^{-1} W_{j,rj}^T (V_j^T b_j)
-//   C_hat_{ij} = Sigma_{i,ri}^{-1} W_{i,ri}^T (V_i^T A_{ij} Z_j) W_{j,rj} Sigma_{j,rj}^{-1}
+//   b_hat_j    = Sigma_{j,rj}^{-1} W_{j,rj}^T (V_tilde_j^T b_j)
+//   C_hat_{ij} = Sigma_{i,ri}^{-1} W_{i,ri}^T (V_tilde_i^T A_{ij} Z_j) W_{j,rj} Sigma_{j,rj}^{-1}
 //
-// Every V^T(...) product is a mvTransMv() reduction (local GEMM + Allreduce of
-// a curDim-sized matrix); the sparse A_{ij} Z_j apply stays fully distributed.
-// All ranks therefore compute identical C_hat/b_hat with no gathers or
-// broadcasts. This is a collective: every rank must call it.
+// Every V_tilde^T(...) product is a mvTransMv() reduction (local GEMM +
+// Allreduce of a curDim-sized matrix); the sparse applies stay fully
+// distributed. All ranks therefore compute identical C_hat/b_hat with no gathers
+// or broadcasts. This is a collective: every rank must call it.
 //
-// Numerical caveat: truncating sigma_k >= svd_tol * sigma_max on G_j's
-// eigenvalues means lambda_k >= svd_tol^2 * lambda_max (= 1e-16*lambda_max at
-// the default), right at double roundoff. For ill-conditioned V_j
-// (cond >~ 1e4) ranks[j] may differ from the GESVD result. SYEV's eigenvector
-// sign convention may also flip individual rows/columns of C_hat/b_hat
-// relative to GESVD — magnitudes and norms are unaffected.
+// Numerical caveat: the Gram matrix squares the condition number, so the
+// achievable truncation floor is kGramSigmaFloor rather than the paper's 1e-10
+// (see that constant). SYEV's eigenvector sign convention may also flip
+// individual rows/columns of C_hat/b_hat relative to a direct GESVD; magnitudes
+// and norms are unaffected.
 inline CHatData computeCHat(
     const State&                                       state,
     Teuchos::RCP<const Thyra::BlockedLinearOpBase<SC>> A_blocked,
     Teuchos::RCP<const MV>                             b,
     const std::vector<int>&                            block_sizes,
-    double                                             svd_tol = 1e-8)
+    double                                             svd_tol = kGramSigmaFloor)
 {
     const int nb       = static_cast<int>(block_sizes.size());
     const int curDim   = state.curDim;
@@ -258,11 +292,36 @@ inline CHatData computeCHat(
 
     const Teuchos::Range1D krylovCols(0, curDim - 1);
 
-    // Per-block distributed views (first curDim columns; no copies).
-    std::vector<Teuchos::RCP<const TpetraMV>> Vt(nb), Zt(nb);
-    for (int j = 0; j < nb; ++j) {
-        Vt[j] = getBlockTpetraMV(state.V, j)->subView(krylovCols);
+    // Per-block distributed views of the preconditioned vectors (first curDim
+    // columns; no copies). state.V is deliberately not used: see below.
+    std::vector<Teuchos::RCP<const TpetraMV>> Zt(nb);
+    for (int j = 0; j < nb; ++j)
         Zt[j] = getBlockTpetraMV(state.Z, j)->subView(krylovCols);
+
+    // V_tilde_j := A_jj Z_j, one sparse apply per block (paper eq 3.3).
+    //
+    // The sampled right-hand side is built by multiplying the stored Z forward
+    // rather than by reading the FGMRES basis V. That is what makes
+    //
+    //     A_jj^-1 V_tilde_j = Z_j                      (paper eq 3.4)
+    //
+    // hold exactly instead of only to the inner solver's tolerance, and it also
+    // removes the off-diagonal [A]_{S0 \ D0} Z contribution that V carries under
+    // Gauss-Seidel. Two things downstream depend on it: the per-block residual
+    // that would otherwise have to be absorbed by the drop tolerance is
+    // identically zero, and C_hat_ii is genuinely the identity (paper eq 3.19)
+    // rather than an identity asserted by fiat.
+    std::vector<Teuchos::RCP<const TpetraMV>> Vt(nb);
+    for (int j = 0; j < nb; ++j) {
+        auto A_jj = getBlockAsCrs(A_blocked, j, j);
+        TEUCHOS_TEST_FOR_EXCEPTION(A_jj.is_null(), std::runtime_error,
+            "Teko::KrylovSurrogate::computeCHat: diagonal block " +
+            std::to_string(j) + " is absent or is not a Tpetra::CrsMatrix, so "
+            "V_tilde = A_jj Z_j cannot be formed and the surrogate is undefined.");
+
+        auto Vt_j = Teuchos::rcp(new TpetraMV(A_jj->getRangeMap(), curDim));
+        A_jj->apply(*Zt[j], *Vt_j, Teuchos::NO_TRANS, 1.0, 0.0);
+        Vt[j] = Vt_j;
     }
 
     // ── Per-block: eigendecomposition of the Gram matrix G_j = V_j^T V_j ──
@@ -287,8 +346,8 @@ inline CHatData computeCHat(
     }
 
     // ── Per (i,j) block of C_hat ──────────────────────────────────────────
-    // C_hat[i][j] = Sigma_i^{-1} W_i^T (V_i^T A_ij Z_j) W_j Sigma_j^{-1}.
-    // A_ij Z_j is the existing distributed sparse apply; V_i^T(...) is a
+    // C_hat[i][j] = Sigma_i^{-1} W_i^T (V_tilde_i^T A_ij Z_j) W_j Sigma_j^{-1}.
+    // A_ij Z_j is the existing distributed sparse apply; V_tilde_i^T(...) is a
     // mvTransMv reduction.
 
     for (int i = 0; i < nb; ++i) {
@@ -298,7 +357,11 @@ inline CHatData computeCHat(
             chat.blocks[i][j].shape(ri, rj);
 
             if (i == j) {
-                // Diagonal block is identity by construction.
+                // Exactly the identity (paper eq 3.19): substituting
+                // A_ii Z_i = V_tilde_i gives Q_i^T V_tilde_i W_i Sigma_i^{-1} =
+                // Q_i^T Q_i Sigma_i Sigma_i^{-1} = I. This holds because
+                // V_tilde is the forward multiply; it was only approximate when
+                // the basis came from the raw FGMRES V.
                 for (int d = 0; d < std::min(ri, rj); ++d)
                     chat.blocks[i][j](d, d) = 1.0;
                 continue;

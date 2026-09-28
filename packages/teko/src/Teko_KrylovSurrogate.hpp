@@ -183,9 +183,24 @@ inline OrderingResult solveOrdering(
         Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &loc_i, &iterate_sec);
     }
 
+    // Verify Belos's verdict against the explicitly recomputed residual before
+    // trusting it. Belos reports convergence from its implicit estimate only
+    // (see trueRelativeResidual), and a candidate that converges falsely stops
+    // early, so it would otherwise report converged with a low iteration count,
+    // a small residual and a short iterate time: it would win every tiebreaker
+    // in both selection comparators. Recording the true residual here is also
+    // what makes final_residual in solved.json/conv.json meaningful.
+    const double tol = solverParams->get(
+        "Convergence Tolerance",
+        static_cast<double>(Belos::DefaultSolverParameters::convTol));
+    const double true_res = trueRelativeResidual(
+        Teuchos::rcp_dynamic_cast<const Thyra::LinearOpBase<SC>>(recon.flatOp),
+        b_new, x_new);
+
     r.iterations            = solver.getNumIters();
-    r.converged             = (ret == Belos::Converged);
-    r.final_residual        = solver.achievedTol();
+    r.converged             = (ret == Belos::Converged) &&
+                              (true_res <= kResidualSlack * tol);
+    r.final_residual        = true_res;
     r.factor_wall_time_sec  = factor_sec;
     r.iterate_wall_time_sec = iterate_sec;
     r.total_wall_time_sec   = factor_sec + iterate_sec;
@@ -293,7 +308,16 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
         ~RegistryResetGuard() { Teko::FactorTimeRegistry::reset(); }
     } registry_reset_guard;
 
-    SolveStats s1{solve1_metrics.num_iters, b_norm, solve1_metrics.achieved_tol,
+    // Solve 1's residual is recomputed explicitly rather than taken from
+    // solve1_metrics.achieved_tol, which is Belos's implicit estimate. On entry
+    // problem->getLHS() holds solve 1's result, so this measures what the
+    // application actually got. Without it conv.json would compare solve 1's
+    // estimate against solve 2's verified residual, which is not like for like.
+    const double solve1_true_res = trueRelativeResidual(
+        Teuchos::rcp_dynamic_cast<const Thyra::LinearOpBase<SC>>(A_blocked),
+        problem->getRHS(), problem->getLHS());
+
+    SolveStats s1{solve1_metrics.num_iters, b_norm, solve1_true_res,
                   solve1_factor_sec, solve1_metrics.wall_time_sec,
                   solve1_factor_sec + solve1_metrics.wall_time_sec};
 
@@ -362,24 +386,21 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
     }
 
     // ── Phase 3: determine method, then sweep / select / re-solve ──────────
-    // Determine method from the existing preconditioner type.
-    // Heuristic: if it dynamic-casts to BlockLowerTriInverseOp → "gs",
-    //            otherwise "jacobi".
-    std::string method = "jacobi";
-    {
-        auto lti = Teuchos::rcp_dynamic_cast<
-            const Teko::BlockLowerTriInverseOp>(problem->getRightPrec());
-        if (!lti.is_null()) method = "gs";
-    }
+    // Forced to block Gauss-Seidel (block lower triangular) regardless of what
+    // the first solve used. Previously this dynamic-cast probed
+    // problem->getRightPrec() for BlockLowerTriInverseOp and fell back to
+    // "jacobi", which made the reconfigured preconditioner's shape depend on
+    // the calling application's choice rather than on this experiment's.
+    const std::string method = "gs";
 
     // Each candidate solve runs a flexible GMRES that would otherwise re-enter
     // this hook; hold the guard across the whole sweep + final solve.
     ScopedAdaptiveLoopGuard recursion_guard;
 
-    // One Ifpack2 inverse factory, reused for every candidate build below
-    // (factory construction is untimed setup; sharing it avoids rebuilding the
-    // Stratimikos inverse library once per ordering).
-    auto invFact = makeIfpack2InverseFactory();
+    // One per-block solver factory (GMRES + RILUK), reused for every candidate
+    // build below (factory construction is untimed setup; sharing it avoids
+    // rebuilding the Stratimikos solve strategy once per ordering).
+    auto invFact = makeBlockSolverInverseFactory();
 
     // Warm-up before a timed sweep. The first build+solve inside this hook
     // pays one-time costs (kernel first-touch, Stratimikos/Ifpack2 setup

@@ -35,6 +35,7 @@
 #include "Thyra_DefaultZeroLinearOp.hpp"
 #include "Thyra_LinearOpBase.hpp"
 #include "Thyra_MultiVectorBase.hpp"
+#include "Thyra_MultiVectorStdOps.hpp"
 #include "Thyra_ProductMultiVectorBase.hpp"
 #include "Thyra_ProductVectorSpaceBase.hpp"
 #include "Thyra_TpetraLinearOp.hpp"
@@ -52,6 +53,7 @@
 #include "Teko_InverseFactory.hpp"
 #include "Teko_InverseLibrary.hpp"
 #include "Teko_KrylovReducedModel.hpp"  // type aliases (SC/LO/GO/Node, MV, OP)
+#include "Teko_SolveInverseFactory.hpp"
 #include "Teko_Utilities.hpp"
 
 // ── Stratimikos ───────────────────────────────────────────────────────────
@@ -59,6 +61,39 @@
 
 namespace Teko {
 namespace KrylovSurrogate {
+
+// ||b - A x|| / ||b||, computed explicitly (one extra apply). Returns the
+// absolute norm when ||b|| is zero.
+//
+// Needed because Belos judges convergence from its recursively updated residual
+// estimate, and cannot be asked for an explicit test here: BlockGmresSolMgr
+// forces the implicit test whenever "Flexible Gmres" is on, and setting
+// "Explicit Residual Test" would switch off the flexible iterator the adaptive
+// hook depends on. With the per-block inverses being inexact inner GMRES solves
+// the preconditioner is non-stationary, so that estimate can cross the
+// tolerance while the true residual does not.
+//
+// Collective: every rank must call it (the norms reduce internally).
+inline double trueRelativeResidual(
+    Teuchos::RCP<const Thyra::LinearOpBase<SC>> A,
+    Teuchos::RCP<const MV>                      b,
+    Teuchos::RCP<const MV>                      x)
+{
+    auto r = Thyra::createMembers(A->range(), 1);
+    Thyra::assign(r.ptr(), *b);
+    Thyra::apply(*A, Thyra::NOTRANS, *x, r.ptr(), -1.0, 1.0);  // r = b - A x
+
+    Teuchos::Array<SC> r_norm(1), b_norm(1);
+    Thyra::norms_2(*r, r_norm());
+    Thyra::norms_2(*b, b_norm());
+    return (b_norm[0] > 0.0) ? r_norm[0] / b_norm[0] : r_norm[0];
+}
+
+// Multiplier applied to the solver tolerance when deciding whether a reported
+// convergence is believable. Deliberately loose: this catches gross false
+// convergence (a garbage answer reported as converged), it does not re-enforce
+// the tolerance itself.
+constexpr double kResidualSlack = 1.0e3;
 
 // Extract A_blocked(i,j) as a Tpetra CrsMatrix (null if the block is null or
 // not a Tpetra CRS operator).
@@ -278,19 +313,48 @@ struct ReconfiguredSystem {
     double                         factor_wall_time_sec;
 };
 
-// Build a Stratimikos-backed Ifpack2 inverse factory. This is configuration
+// Per-block solver for the reconfigured system: Belos GMRES converged to
+// kBlockSolveTol, preconditioned by Ifpack2 RILUK (ILU(k)). Every group
+// diagonal, merged or singleton, is inverted this way. This is configuration
 // setup only (no factorization happens here, so it is outside the factor-time
 // accounting); build it once and reuse it across a sweep rather than
 // rebuilding per ordering.
-inline Teuchos::RCP<Teko::InverseFactory> makeIfpack2InverseFactory()
+//
+// Built directly from a Stratimikos builder rather than through
+// Teko::InverseLibrary, which cannot express a preconditioned solver: its
+// buildFromStratimikos() reads getValidParameters() and discards any list set
+// on the builder, and addStratSolver() hardcodes "Preconditioner Type" to
+// "None". Going straight to createLinearSolveStrategy() honors both the solver
+// and preconditioner sections of the list below.
+//
+// Every value here is set explicitly. Left unset, Ifpack2 silently defaults
+// "Prec Type" to ILUT (Thyra_Ifpack2PreconditionerFactory) and RILUK defaults
+// its fill to 0, so an omitted key means inheriting a default chosen three
+// layers down rather than one chosen here.
+constexpr double kBlockSolveTol     = 1e-4;
+constexpr int    kBlockSolveMaxIter = 200;
+constexpr int    kBlockPrecFillLevel = 0;   // RILUK level-of-fill, 0 is ILU(0)
+
+inline Teuchos::RCP<Teko::InverseFactory> makeBlockSolverInverseFactory()
 {
     Stratimikos::DefaultLinearSolverBuilder builder;
     auto stratParams = Teuchos::rcp(new Teuchos::ParameterList);
-    stratParams->set("Linear Solver Type",  "Belos");
+
+    stratParams->set("Linear Solver Type", "Belos");
+    auto& belos = stratParams->sublist("Linear Solver Types").sublist("Belos");
+    belos.set("Solver Type", "Block GMRES");
+    auto& gmres = belos.sublist("Solver Types").sublist("Block GMRES");
+    gmres.set("Convergence Tolerance", kBlockSolveTol);
+    gmres.set("Maximum Iterations",    kBlockSolveMaxIter);
+
     stratParams->set("Preconditioner Type", "Ifpack2");
+    auto& ifpack2 = stratParams->sublist("Preconditioner Types").sublist("Ifpack2");
+    ifpack2.set("Prec Type", "RILUK");
+    ifpack2.sublist("Ifpack2 Settings").set("fact: iluk level-of-fill", kBlockPrecFillLevel);
+
     builder.setParameterList(stratParams);
-    auto invLib = Teko::InverseLibrary::buildFromStratimikos(builder);
-    return invLib->getInverseFactory("Ifpack2");
+    return Teuchos::rcp(new Teko::SolveInverseFactory(
+        builder.createLinearSolveStrategy("")));
 }
 
 // Build the reconfigured system and preconditioner from an ordering vector.
