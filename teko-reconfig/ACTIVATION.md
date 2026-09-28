@@ -44,7 +44,7 @@ concept each); chase references by file, not just line:
 | `TEKO_ADAPTIVE_RECONFIG` | [`Teko_KrylovSurrogate.hpp:228`](../packages/teko/src/Teko_KrylovSurrogate.hpp#L228) | unset → inert |
 | `TEKO_RECONFIG_REQUESTS_DIR` | [`Teko_KrylovSurrogate.hpp:236`](../packages/teko/src/Teko_KrylovSurrogate.hpp#L236) | `kDefaultRequestsDir` ([`:91`](../packages/teko/src/Teko_KrylovSurrogate.hpp#L91)) |
 | `TEKO_FACTOR_WARMUP` | [`Teko_InverseFactory.cpp:130`](../packages/teko/src/Teko_InverseFactory.cpp#L130) | on |
-| `TEKO_WATCHER_IDLE_TIMEOUT` | [`wait_for_request.py:40`](wait_for_request.py#L40) | 1000 s |
+| `TEKO_WATCHER_IDLE_TIMEOUT` | [`wait_for_request.py:48`](wait_for_request.py#L48) | 1000 s |
 
 ## Activates only when ALL hold
 - **`TEKO_ADAPTIVE_RECONFIG` is set** (truthy) — the gate above; inert otherwise.
@@ -183,3 +183,45 @@ left unchecked it would report `converged` with a low iteration count, a small
 residual and a short iterate time, winning every tiebreaker in both `best_conv`
 and `best_time`. The bias also grows with merging, since a merged group is
 larger and less well conditioned than the singletons it replaces.
+
+## How the watcher picks the ordering
+
+`wait_for_request.py` generates no orderings of its own. It hands the request's
+surrogate to [`surrogate_search.py`](surrogate_search.py), a thin layer over
+pyautoteko (expected as a sibling of this fork, the `$ROOT` layout in
+trilinos-teko-pyfront's `SETUP.md`):
+
+1. `C_hat` and `b_hat` are rebuilt as a pyautoteko `BlockMatrix` pair, blocked
+   by `ranks` at the `equation_ends` boundaries.
+2. pyautoteko's `RandomSearch` enumerates the orderings (every one of them when
+   there are few enough: 541 at 5 blocks, about 1.4 s) or samples up to
+   `MAX_SEARCH_COUNT` of them when there are not.
+3. Each is scored by an FGMRES solve on the surrogate alone, at
+   `SURROGATE_JITTER = 1e-4`, matching `kBlockSolveTol` so the surrogate is
+   evaluated under the same inexactness the real block solves run at. No cost
+   model of the real system exists yet, so ranking is on iterations alone
+   (`RandomSearch`'s `unit_cost`).
+4. `use_ordering` and `opt_ordering` are both the pick from
+   `pick_opt_ordering`: with
+   `threshold = (max_iters - min_iters) * 0.2 + min_iters`, the ordering with
+   the FEWEST mergers among those at or below it, ties broken on fewer
+   iterations then on the ordering itself.
+
+`SEARCH_ON_STEPS` in the watcher decides which steps pay for a search at all.
+A step is the request number `N` in `s<N>_request.json`, one adaptive solve,
+numbered from 0 within a run. `None` (the default) searches every step, `[]`
+searches none, and a list such as `[0, 3]` searches only those (any container
+works, so `range(4)` is fine). A skipped step is still answered, with the same
+fully merged ordering the unavailable-pyautoteko path uses, and the watcher
+says which step it skipped and why.
+
+`EMIT_TEST_ORDERINGS` in the watcher (default **off**) sends every scored
+ordering as a `test_ordering` as well, so the C++ side builds, solves and times
+each on the full system into `s<N>_solved.json`. That is the ground truth the
+surrogate is predicting, and it costs one real solve per ordering.
+
+If pyautoteko is not importable (missing clone, or a Python without
+numpy/scipy) the watcher prints a warning naming the reason and the path it
+looked in, and answers with the fully merged ordering `[0, 0, ..., 0]` under
+`selection_mode: "chosen"`. That still converges, so a run with a broken
+watcher finishes instead of hanging or applying a preconditioner nobody chose.
