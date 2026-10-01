@@ -239,12 +239,9 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
     // reconfig handshake. Do nothing unless TEKO_ADAPTIVE_RECONFIG is set to a
     // truthy value. (A per-solve ParameterList flag is not used because Belos
     // validates the solver parameter list and rejects unknown keys.)
-    {
-        const char* en = std::getenv("TEKO_ADAPTIVE_RECONFIG");
-        const std::string v = en ? std::string(en) : "";
-        const bool enabled = !(v.empty() || v == "0" || v == "false" || v == "FALSE");
-        if (!enabled) return {};
-    }
+    // The predicate itself lives in Teko_KrylovReconfigPrec.hpp, so the front
+    // end can ask the same question without including this header.
+    if (!adaptiveEnabled()) return {};
 
     // requests_dir comes from TEKO_RECONFIG_REQUESTS_DIR if set, otherwise
     // kDefaultRequestsDir.

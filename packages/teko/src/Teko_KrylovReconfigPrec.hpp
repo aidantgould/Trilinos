@@ -18,6 +18,7 @@
 // ── Standard library ──────────────────────────────────────────────────────
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -61,6 +62,22 @@
 
 namespace Teko {
 namespace KrylovSurrogate {
+
+// Is the adaptive-reconfiguration hook live? Reads TEKO_ADAPTIVE_RECONFIG;
+// unset, empty, "0", "false" and "FALSE" all mean off.
+//
+// The single definition of "the hook is on", because two places need it and
+// they must not drift: adaptiveLoop's opt-in gate, and any caller deciding
+// whether its own solve has to match what the hook's re-solve will do (the
+// front end's choice of per-block inverse, teko_ext.cpp). A caller that
+// disagreed with the gate would either pay the hook's costs without the hook
+// running, or set up a first solve the re-solve cannot be compared with.
+inline bool adaptiveEnabled()
+{
+    const char* en = std::getenv("TEKO_ADAPTIVE_RECONFIG");
+    const std::string v = en ? std::string(en) : "";
+    return !(v.empty() || v == "0" || v == "false" || v == "FALSE");
+}
 
 // ||b - A x|| / ||b||, computed explicitly (one extra apply). Returns the
 // absolute norm when ||b|| is zero.

@@ -46,6 +46,34 @@ concept each); chase references by file, not just line:
 | `TEKO_FACTOR_WARMUP` | [`Teko_InverseFactory.cpp:130`](../packages/teko/src/Teko_InverseFactory.cpp#L130) | on |
 | `TEKO_WATCHER_IDLE_TIMEOUT` | [`wait_for_request.py:48`](wait_for_request.py#L48) | 1000 s |
 
+## What else the flag now controls
+
+Beyond the hook itself, `TEKO_ADAPTIVE_RECONFIG` decides how
+`trilinos-teko-pyfront`'s `teko_ext.cpp` inverts the diagonal blocks of its OWN
+(first) solve:
+
+| flag | block inverse |
+| --- | --- |
+| on | Belos GMRES to `kBlockSolveTol` + Ifpack2 RILUK, the same factory the re-solve uses, so solve 1 and solve 2 are comparable |
+| off | one Ifpack2 apply (ILUT), which is what it was before the hook existed |
+
+Both read the one predicate, `Teko::KrylovSurrogate::adaptiveEnabled()` in
+[`Teko_KrylovReconfigPrec.hpp`](../packages/teko/src/Teko_KrylovReconfigPrec.hpp),
+so the front end's choice cannot drift from the gate the hook fires on. The
+extension prints which it chose once per process on rank 0:
+
+```
+[Teko] block inverse: Ifpack2 (ILUT), single apply (TEKO_ADAPTIVE_RECONFIG off)
+[Teko] block inverse: Belos GMRES + Ifpack2 RILUK (adaptive hook live)
+```
+
+The reason for the split is cost: wrapping every block inverse in a Belos solve
+manager is 2.2x to 2.8x on the whole solve, and an arm with the inner GMRES
+capped at a single iteration is exactly as slow, so it is the wrapper and not
+the inner iteration count. A run with no re-solve to be comparable with has
+nothing to buy for that. Measured in
+`pyautoteko/claudes_world/adaptive_flag_ab_experiment`.
+
 ## Activates only when ALL hold
 - **`TEKO_ADAPTIVE_RECONFIG` is set** (truthy) — the gate above; inert otherwise.
 - The app **links/loads `libteko`** (its static initializer registers the
