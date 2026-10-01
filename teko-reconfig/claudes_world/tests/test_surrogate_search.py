@@ -140,33 +140,52 @@ def test_search_is_deterministic():
 
 def test_search_on_a_recorded_request():
     # the real thing, if a request from a previous run is lying around
-    # (requests/ is gitignored, so this is best effort)
+    # (requests/ is gitignored, so this is best effort). Capped at a handful of
+    # orderings on purpose: this checks that a real request's shape parses and
+    # searches, and a recorded surrogate can be large (a run at nb=160 leaves
+    # R = 801, where a full 541-ordering search takes minutes).
     path = RECONFIG_DIR / "requests" / "s0_request.json"
     if not path.exists():
         return
     with open(path) as f:
         req = json.load(f)
-    result = surrogate_search.search(req)
-    assert result.n_evaluated > 0
+    result = surrogate_search.search(req, max_search_count=4)
+    assert 0 < result.n_evaluated <= 4
     assert len(result.opt_ordering) == req["n_blocks"]
 
 
 # ── the watcher's use of it ───────────────────────────────────────────────
 
+def emit_test_orderings(value):
+    """Set EMIT_TEST_ORDERINGS and give back its previous value.
+
+    Set explicitly rather than assumed: it is a knob the owner flips between
+    runs, so a test that reads the module's current value tests the last edit
+    rather than the behavior.
+    """
+    was = watcher.EMIT_TEST_ORDERINGS
+    watcher.EMIT_TEST_ORDERINGS = value
+    return was
+
+
 def test_choose_ordering_uses_the_search():
     req = fake_request()
-    use, opt, tests = watcher.choose_ordering(req)
+    was = emit_test_orderings(False)
+    try:
+        use, opt, tests = watcher.choose_ordering(req)
+    finally:
+        emit_test_orderings(was)
     assert use == opt and len(use) == req["n_blocks"]
-    assert tests == []          # EMIT_TEST_ORDERINGS is off by default
+    assert tests == []
 
 
 def test_choose_ordering_emits_test_orderings_when_asked():
     req = fake_request()
-    watcher.EMIT_TEST_ORDERINGS = True
+    was = emit_test_orderings(True)
     try:
         _, _, tests = watcher.choose_ordering(req)
     finally:
-        watcher.EMIT_TEST_ORDERINGS = False
+        emit_test_orderings(was)
     assert len(tests) == 13     # every ordering the search scored
 
 

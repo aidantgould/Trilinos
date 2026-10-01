@@ -63,7 +63,7 @@ SELECTION_MODE = "chosen"
 # system (results land in s<N>_solved.json). That is the ground truth the
 # surrogate is predicting, and it is expensive: one real solve per ordering,
 # 541 of them at 5 blocks. Off by default; the search itself runs either way.
-EMIT_TEST_ORDERINGS = True
+EMIT_TEST_ORDERINGS = False
 
 # Which steps the surrogate search runs on. A "step" is the request number N in
 # s<N>_request.json: one adaptive solve, numbered from 0 within a run (the
