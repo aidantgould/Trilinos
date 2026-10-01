@@ -266,7 +266,22 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
     // validates the solver parameter list and rejects unknown keys.)
     // The predicate itself lives in Teko_KrylovReconfigPrec.hpp, so the front
     // end can ask the same question without including this header.
-    if (!adaptiveEnabled()) return {};
+    //
+    // Announced on every solve that reaches here, open or closed, and on every
+    // rank: this is the line that distinguishes "the hook is switched off" from
+    // "the hook was never invoked at all", which look identical from the
+    // outside and are completely different problems. It reports the raw
+    // variable too, so a value that is set but falsy (0, false) is visible as
+    // such rather than looking unset. Note the recursion guard above returns
+    // first, so Phase 4's re-solve does not print a second time.
+    {
+        const char* raw = std::getenv("TEKO_ADAPTIVE_RECONFIG");
+        const bool enabled = adaptiveEnabled();
+        announceBoth(std::string("[TekoAdaptive] gate: TEKO_ADAPTIVE_RECONFIG=")
+                     + (raw ? (*raw ? raw : "(empty)") : "(unset)")
+                     + " -> hook " + (enabled ? "ACTIVE" : "inert") + "\n");
+        if (!enabled) return {};
+    }
 
     // requests_dir comes from TEKO_RECONFIG_REQUESTS_DIR if set, otherwise
     // defaultRequestsDir(). Announced either way, on rank 0 below, because a

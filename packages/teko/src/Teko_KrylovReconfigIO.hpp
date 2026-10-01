@@ -233,7 +233,10 @@ inline int writeRequestJson(const CHatData& chat, const std::string& requests_di
 
     fs::rename(tmp_path, path);
 
-    std::cout << "[TekoAdaptive] wrote " << path << "\n";
+    // Absolute, on both streams: this is the file a watcher has to find, and
+    // the path is useless to whoever is debugging if it is relative to a
+    // working directory they cannot see.
+    announceBoth("[TekoAdaptive] wrote request " + absolutePathString(path) + "\n");
     return request_id;
 }
 
@@ -379,8 +382,16 @@ inline ReconfigResponse waitForReconfig(
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
 
-    std::cout << "[TekoAdaptive] waiting for " << path << " ...\n";
-    std::cout.flush();
+    // The whole point of this line is to be actionable while the solve is
+    // blocked: it names the exact file being waited for, in full, plus the
+    // directory a watcher must be pointed at and how long before giving up.
+    // On both streams, since a run that is stuck here is exactly the run whose
+    // buffered stdout may never flush.
+    const std::string abs_path = absolutePathString(path);
+    const std::string dir = std::filesystem::path(abs_path).parent_path().string();
+    announceBoth("[TekoAdaptive] waiting up to " + std::to_string(timeout_s)
+                 + "s for the watcher to write " + abs_path + "\n"
+                 + "[TekoAdaptive]   a watcher must be running on: " + dir + "\n");
 
     while (std::chrono::steady_clock::now() < deadline) {
         if (fs::exists(path)) {

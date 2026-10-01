@@ -16,9 +16,12 @@
 // ── Standard library ──────────────────────────────────────────────────────
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 // ── Teuchos ───────────────────────────────────────────────────────────────
@@ -46,6 +49,37 @@
 
 namespace Teko {
 namespace KrylovSurrogate {
+
+// ── Diagnostics ───────────────────────────────────────────────────────────
+
+// Write one line to BOTH stdout and stderr, flushing each. NOT an error path:
+// nothing here throws, aborts, or changes a return value, it is the same
+// informational line twice.
+//
+// Both, because neither alone is reliable in a hosted application. stdout is
+// where an application's normal logging goes, but it is fully buffered when it
+// is not a terminal, so a run that aborts mid-solve loses whatever had not
+// flushed, and these lines exist precisely to explain runs that die. stderr is
+// unbuffered and survives that, but applications routinely redirect it
+// elsewhere or discard it. The cost of duplicating is that a caller merging the
+// two streams (`2>&1`) sees each line twice.
+inline void announceBoth(const std::string& line)
+{
+    std::cout << line << std::flush;
+    std::cerr << line << std::flush;
+}
+
+// An absolute form of p, for diagnostics that have to be actionable: a reader
+// (or a watcher pointed at the wrong place) needs the full path, and
+// TEKO_RECONFIG_REQUESTS_DIR may well have been set to a relative one. Returns
+// p unchanged if the filesystem cannot resolve it rather than throwing, since
+// this is only ever used to build a message.
+inline std::string absolutePathString(const std::string& p)
+{
+    std::error_code ec;
+    const auto abs = std::filesystem::absolute(p, ec);
+    return ec ? p : abs.string();
+}
 
 // ── Type aliases matching teko_ext.cpp ────────────────────────────────────
 // SC is fixed to double (the surrogate's dense math and the Belos adaptive
