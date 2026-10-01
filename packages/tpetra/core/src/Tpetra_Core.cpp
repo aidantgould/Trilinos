@@ -22,6 +22,10 @@
 #include "KokkosKernels_EagerInitialize.hpp"
 #include "Tpetra_Details_initializeKokkos.hpp"
 
+#include <iostream>
+#include <set>
+#include <string>
+
 namespace Tpetra {
 
 namespace {  // (anonymous)
@@ -146,6 +150,34 @@ Teuchos::RCP<const Teuchos::Comm<int> > getDefaultComm() {
   return wrappedDefaultComm_;
 }
 
+// ── Branch tracer ─────────────────────────────────────────────────────────
+// Says, once per process per call site, which Trilinos source tree this
+// binary was actually built from. Diagnostic only: nothing here throws, and
+// no return value or control flow depends on it.
+//
+// Written to BOTH stdout and stderr, flushed: stdout is where an application
+// logs, but is fully buffered to a file or pipe and lost if the run aborts,
+// while stderr is unbuffered and survives that but is often redirected away.
+// A caller merging the streams sees each line twice, which is the price.
+//
+// Deliberately a plain function called from real code, NOT a file-scope static
+// initializer: a static link drops object files nothing references, which is
+// exactly why Teko's adaptive hook registration silently never runs in a
+// statically linked application. A call from a function the application
+// actually invokes cannot be dropped that way.
+namespace {
+void announceTrilinosBranchOnce(const char* site) {
+  static const char* const kBranch = "aidantgould/teko-baseline-tracer";
+  // one line per site, not per call: a per-call line would swamp a real run
+  static std::set<std::string> announced;
+  if (!announced.insert(site).second) return;
+  const std::string line =
+      std::string("[Trilinos] branch ") + kBranch + " | " + site + "\n";
+  std::cout << line << std::flush;
+  std::cerr << line << std::flush;
+}
+}  // namespace
+
 void initialize(int* argc, char*** argv) {
   if (!tpetraIsInitialized_) {
 #if defined(HAVE_TPETRACORE_MPI)
@@ -160,6 +192,7 @@ void initialize(int* argc, char*** argv) {
 
     Tpetra::Details::Behavior::reject_unrecognized_env_vars();
   }
+  announceTrilinosBranchOnce("Tpetra::initialize");
   tpetraIsInitialized_ = true;
 }
 
@@ -184,6 +217,7 @@ void initialize(int* argc, char*** argv, MPI_Comm comm) {
 
     Tpetra::Details::Behavior::reject_unrecognized_env_vars();
   }
+  announceTrilinosBranchOnce("Tpetra::initialize");
   tpetraIsInitialized_ = true;
 
   // Set the default communicator.  We set it here, after the above
@@ -227,6 +261,7 @@ void initialize(int* argc, char*** argv,
 
     Tpetra::Details::Behavior::reject_unrecognized_env_vars();
   }
+  announceTrilinosBranchOnce("Tpetra::initialize");
   tpetraIsInitialized_ = true;
   wrappedDefaultComm_  = comm;
 }
