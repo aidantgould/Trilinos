@@ -71,6 +71,10 @@
 #include "Teko_SolveInverseFactory.hpp"
 #include "Teko_PreconditionerInverseFactory.hpp"
 
+#include <iostream>
+#include <set>
+#include <string>
+
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -83,6 +87,35 @@ using Teuchos::rcp_const_cast;
 using Teuchos::rcp_dynamic_cast;
 
 namespace Teko {
+
+// ── Branch tracer ─────────────────────────────────────────────────────────
+// Says, once per process per call site, which Trilinos source tree this
+// binary was actually built from. Diagnostic only: nothing here throws, and
+// no return value or control flow depends on it.
+//
+// Written to BOTH stdout and stderr, flushed: stdout is where an application
+// logs, but is fully buffered to a file or pipe and lost if the run aborts,
+// while stderr is unbuffered and survives that but is often redirected away.
+// A caller merging the streams sees each line twice, which is the price.
+//
+// Deliberately a plain function called from real code, NOT a file-scope static
+// initializer: a static link drops object files nothing references, which is
+// exactly why Teko's adaptive hook registration silently never runs in a
+// statically linked application. A call from a function the application
+// actually invokes cannot be dropped that way.
+namespace {
+void announceTrilinosBranchOnce(const char* site) {
+  static const char* const kBranch = "aidantgould/teko-reconfig-request";
+  // one line per site, not per call: a per-call line would swamp a real run
+  static std::set<std::string> announced;
+  if (!announced.insert(site).second) return;
+  const std::string line =
+      std::string("[Trilinos] branch ") + kBranch + " | " + site + "\n";
+  std::cout << line << std::flush;
+  std::cerr << line << std::flush;
+}
+}  // namespace
+
 
 namespace FactorTimeRegistry {
 
@@ -148,6 +181,7 @@ void maybeWarmupFactor(const InverseFactory& factory, const LinearOp& A) {
 
 //! Build an inverse operator using a factory and a linear operator
 InverseLinearOp buildInverse(const InverseFactory& factory, const LinearOp& A) {
+  announceTrilinosBranchOnce("Teko::buildInverse(factory,A)");
   maybeWarmupFactor(factory, A);
   FactorStopwatch stopwatch;
   InverseLinearOp inv;
@@ -182,6 +216,7 @@ InverseLinearOp buildInverse(const InverseFactory& factory, const LinearOp& A) {
  */
 InverseLinearOp buildInverse(const InverseFactory& factory, const LinearOp& A,
                              const LinearOp& precOp) {
+  announceTrilinosBranchOnce("Teko::buildInverse(factory,A,precOp)");
   Teko_DEBUG_SCOPE("buildInverse(factory,A,precOp)", 10);
   FactorStopwatch stopwatch;
   InverseLinearOp inv;
