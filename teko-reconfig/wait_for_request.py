@@ -25,8 +25,12 @@ automatically. To run it standalone (from its own directory):
 
 All three file types (s<N>_request.json, s<N>_reconfig.json, s<N>_conv.json)
 live together in one directory. Defaults to the "requests" sibling of this
-script; override with TEKO_RECONFIG_REQUESTS_DIR to match the C++ side's
-default (kDefaultRequestsDir in Teko_KrylovSurrogate.hpp).
+script. The C++ side defaults elsewhere, to `teko-reconfig-requests` under the
+directory the application was launched from (`defaultRequestsDir()` in
+Teko_KrylovSurrogate.hpp), so the two agree only when
+TEKO_RECONFIG_REQUESTS_DIR is exported to both. pyTeko() does that for you; when
+driving a separate application, set it yourself. The hook prints the directory
+it resolved.
 """
 
 import glob

@@ -42,7 +42,7 @@ concept each); chase references by file, not just line:
 | Env var | Read in | Default |
 | --- | --- | --- |
 | `TEKO_ADAPTIVE_RECONFIG` | [`Teko_KrylovSurrogate.hpp:228`](../packages/teko/src/Teko_KrylovSurrogate.hpp#L228) | unset → inert |
-| `TEKO_RECONFIG_REQUESTS_DIR` | [`Teko_KrylovSurrogate.hpp:236`](../packages/teko/src/Teko_KrylovSurrogate.hpp#L236) | `kDefaultRequestsDir` ([`:91`](../packages/teko/src/Teko_KrylovSurrogate.hpp#L91)) |
+| `TEKO_RECONFIG_REQUESTS_DIR` | [`Teko_KrylovSurrogate.hpp`](../packages/teko/src/Teko_KrylovSurrogate.hpp) | `$PWD/teko-reconfig-requests`, via `defaultRequestsDir()` |
 | `TEKO_FACTOR_WARMUP` | [`Teko_InverseFactory.cpp:130`](../packages/teko/src/Teko_InverseFactory.cpp#L130) | on |
 | `TEKO_WATCHER_IDLE_TIMEOUT` | [`wait_for_request.py:48`](wait_for_request.py#L48) | 1000 s |
 
@@ -88,7 +88,10 @@ nothing to buy for that. Measured in
 - The first solve produced Krylov data (`curDim > 0`) — true whether it
   converged or stalled at max-iters. A `curDim == 0` breakdown returns early.
 - A **watcher** answers `s<N>_reconfig.json` in the requests dir
-  (`TEKO_RECONFIG_REQUESTS_DIR`, else the hardcoded `kDefaultRequestsDir`).
+  (`TEKO_RECONFIG_REQUESTS_DIR`, else `defaultRequestsDir()`, which is
+  `teko-reconfig-requests` under the directory the application was launched
+  from. The hook prints the resolved path once, and says whether it was set or
+  defaulted, so a watcher can be pointed at the same place.)
   Needed for both the converged and the stalled (rescue) paths, since both
   build the surrogate and reconfigure.
 

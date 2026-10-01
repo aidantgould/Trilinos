@@ -15,7 +15,8 @@
 //   adaptiveLoop() is registered as the BelosAdaptiveHook and fires after
 //   every flexible GMRES solve on a blocked operator (converged or stalled).
 //   The request/response/convergence files live in TEKO_RECONFIG_REQUESTS_DIR
-//   if set, otherwise kDefaultRequestsDir below.
+//   if set, otherwise defaultRequestsDir() below (teko-reconfig-requests under
+//   the working directory the application was launched from).
 //
 // adaptiveLoop():
 //   1. Computes C_hat and writes s<N>_request.json to requests_dir, where
@@ -39,6 +40,7 @@
 #include <iostream>
 #include <numeric>
 #include <string>
+#include <system_error>   // error_code, for the non-throwing fs::current_path
 #include <utility>
 #include <vector>
 
@@ -88,7 +90,30 @@ getCommAndRank(Teuchos::RCP<const MV> mv)
 // when TEKO_RECONFIG_REQUESTS_DIR is unset. All file types live together in
 // this single directory. Hardcoded for now, relative to the Trilinos checkout
 // this package lives in.
-constexpr const char* kDefaultRequestsDir = "/home/node/codespace/Trilinos/teko-reconfig/requests";
+// Where the request/reconfig/convergence JSON goes when
+// TEKO_RECONFIG_REQUESTS_DIR is unset: "teko-reconfig-requests" under the
+// process's current working directory. That is the directory the application was
+// LAUNCHED from (or whatever it last chdir'd to), not the build tree, not the
+// install prefix, and not the executable's own directory. Rank 0 creates it.
+//
+// Resolved on each call rather than once at load, so it follows a chdir, and
+// returned absolute so the paths this hook prints are unambiguous in a log.
+// Falls back to the bare relative name if the cwd cannot be read (it can fail
+// if the directory has been deleted under the process), which the filesystem
+// then resolves the same way.
+//
+// This used to be a hardcoded absolute path from the container the hook was
+// first developed in, which existed on no other machine: with the flag set and
+// the variable unset, an unrelated application would try to create
+// /home/node/..., fail, and then block for the full waitForOrdering timeout
+// with no watcher able to find the directory.
+inline std::string defaultRequestsDir()
+{
+    std::error_code ec;
+    const auto cwd = fs::current_path(ec);
+    return ec ? std::string("teko-reconfig-requests")
+              : (cwd / "teko-reconfig-requests").string();
+}
 
 // adaptiveLoop()'s Phase 4 below runs a second flexible FGMRES solve, which
 // (if it converges) would re-invoke this same hook recursively on the
@@ -244,9 +269,12 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
     if (!adaptiveEnabled()) return {};
 
     // requests_dir comes from TEKO_RECONFIG_REQUESTS_DIR if set, otherwise
-    // kDefaultRequestsDir.
+    // defaultRequestsDir(). Announced either way, on rank 0 below, because a
+    // watcher has to be pointed at this exact directory and guessing it from a
+    // launch directory is how an afternoon disappears.
     const char* reconfig_dir_env = std::getenv("TEKO_RECONFIG_REQUESTS_DIR");
-    const std::string requests_dir = reconfig_dir_env ? std::string(reconfig_dir_env) : kDefaultRequestsDir;
+    const std::string requests_dir = reconfig_dir_env ? std::string(reconfig_dir_env)
+                                                      : defaultRequestsDir();
 
     if (A_blocked.is_null()) {
         std::cerr << "[TekoAdaptive] operator is not blocked; skipping.\n";
@@ -262,7 +290,21 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
     // collective and run identically on every rank.
     auto [comm, rank] = getCommAndRank(state.V);
 
-    if (rank == 0) fs::create_directories(requests_dir);
+    if (rank == 0) {
+        // Name the directory once per process, and say whether it was chosen or
+        // defaulted: the default depends on where the application was launched
+        // from, and a watcher pointed anywhere else leaves this solve blocking
+        // in waitForOrdering until it times out.
+        static bool dir_announced = false;
+        if (!dir_announced) {
+            dir_announced = true;
+            std::cout << "[TekoAdaptive] requests dir: " << requests_dir
+                      << (reconfig_dir_env ? "  (TEKO_RECONFIG_REQUESTS_DIR)"
+                                           : "  (default: $PWD/teko-reconfig-requests)")
+                      << "\n";
+        }
+        fs::create_directories(requests_dir);
+    }
     // All request/reconfig/convergence files live together in requests_dir.
     const std::string convergence_dir = requests_dir;
 
