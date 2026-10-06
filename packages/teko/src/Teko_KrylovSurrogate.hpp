@@ -55,6 +55,7 @@
 // ── Belos ─────────────────────────────────────────────────────────────────
 #include "BelosAdaptiveHook.hpp"
 #include "BelosBlockGmresSolMgr.hpp"
+#include "BelosAdaptiveDiag.hpp"
 #include "BelosLinearProblem.hpp"
 #include "BelosThyraAdapter.hpp"
 #include "BelosTypes.hpp"
@@ -258,7 +259,10 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
 {
     // Bail out immediately if this call is the recursive re-entry from
     // Phase 4's solver2.solve() below (see ScopedAdaptiveLoopGuard).
-    if (detail::g_inAdaptiveLoop) return {};
+    if (detail::g_inAdaptiveLoop) {
+        Belos::AdaptiveDiag::print("T1", "adaptiveLoop re-entered from its own re-solve; returning (expected)");
+        return {};
+    }
 
     // Opt-in gate. The hook is registered globally at libteko load, so it would
     // otherwise fire on *every* flexible blocked GMRES solve in any process

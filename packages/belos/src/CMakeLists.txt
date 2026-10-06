@@ -24,6 +24,7 @@ TRIBITS_INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR})
 # CORE
 APPEND_SET(HEADERS
   Belos_Details_EBelosSolverType.hpp
+  BelosAdaptiveDiag.hpp
   BelosBiCGStabIter.hpp
   BelosBiCGStabSolMgr.hpp
   BelosBlockCGIter.hpp

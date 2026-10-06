@@ -28,6 +28,7 @@
 #include "BelosGmresIteration.hpp"
 #include "BelosBlockGmresIter.hpp"
 #include "BelosBlockFGmresIter.hpp"
+#include "BelosAdaptiveDiag.hpp"
 #ifdef HAVE_BELOS_THYRA
 #include "BelosAdaptiveHook.hpp"
 #include "Thyra_BlockedLinearOpBase.hpp"
@@ -914,9 +915,46 @@ ReturnType BlockGmresSolMgr<ScalarType,MV,OP,DM>::solve() {
   TEUCHOS_TEST_FOR_EXCEPTION(!problem_->isProblemSet(),BlockGmresSolMgrLinearProblemFailure,
     "Belos::BlockGmresSolMgr::solve(): Linear problem is not ready, setProblem() has not been called.");
 
+  // Diagnostic: checkStatusTest() silently turns flexible off when there is no
+  // right preconditioner, so record what was asked for before it runs.
+  const bool diagFlexRequested = isFlexible_;
+
   if (!isSTSet_ || (!expResTest_ && !Teuchos::is_null(problem_->getLeftPrec())) ) {
     TEUCHOS_TEST_FOR_EXCEPTION( checkStatusTest(),BlockGmresSolMgrLinearProblemFailure,
       "Belos::BlockGmresSolMgr::solve(): Linear problem and requested status tests are incompatible.");
+  }
+
+  // Diagnostic B1: which instantiation is running and whether it can reach the
+  // hook at all (Thyra types, HAVE_BELOS_THYRA, flexible, blocked operator).
+  {
+    using namespace Belos::AdaptiveDiag;
+    std::ostringstream m;
+    m << "BlockGmresSolMgr::solve entered: label=" << label_
+      << " SC=" << typeName<ScalarType>() << " MV=" << typeName<MV>()
+      << " OP=" << typeName<OP>();
+#ifdef HAVE_BELOS_THYRA
+    m << " HAVE_BELOS_THYRA=yes";
+#else
+    m << " HAVE_BELOS_THYRA=no (hook compiled out)";
+#endif
+    m << " flexible requested=" << yesNo(diagFlexRequested)
+      << " effective=" << yesNo(isFlexible_)
+      << " leftPrec=" << (Teuchos::is_null(problem_->getLeftPrec()) ? "null" : "set")
+      << " rightPrec=" << (Teuchos::is_null(problem_->getRightPrec()) ? "null" : "set")
+      << " numRHS=" << MVT::GetNumberVecs(*(problem_->getRHS()));
+#ifdef HAVE_BELOS_THYRA
+    if constexpr (std::is_same_v<ScalarType,  double> &&
+                  std::is_same_v<MV, Thyra::MultiVectorBase<double>> &&
+                  std::is_same_v<OP, Thyra::LinearOpBase<double>>) {
+      auto op = problem_->getOperator();
+      auto blk = Teuchos::rcp_dynamic_cast<const Thyra::BlockedLinearOpBase<double>>(op);
+      m << " thyraTypes=yes opBlocked=" << yesNo(!blk.is_null())
+        << " op=" << (op.is_null() ? std::string("null") : op->description());
+    } else {
+      m << " thyraTypes=no (hook compiled out of this instantiation)";
+    }
+#endif
+    print("B1", m.str());
   }
 
   // Create indices for the linear systems to be solved.
@@ -1249,6 +1287,23 @@ ReturnType BlockGmresSolMgr<ScalarType,MV,OP,DM>::solve() {
       if constexpr (std::is_same_v<ScalarType,  double> &&
                     std::is_same_v<MV, Thyra::MultiVectorBase<double>> &&
                     std::is_same_v<OP, Thyra::LinearOpBase<double>>) {
+        // Diagnostic B2: every check the converged-path call site makes.
+        {
+          using namespace Belos::AdaptiveDiag;
+          auto dIter = Teuchos::rcp_dynamic_cast<BlockFGmresIter<ScalarType,MV,OP>>(block_gmres_iter);
+          auto dBlk = Teuchos::rcp_dynamic_cast<const Thyra::BlockedLinearOpBase<ScalarType>>(
+            problem_->getOperator());
+          const bool fire = isFlexible_ && isConverged && !dIter.is_null() && !dBlk.is_null();
+          std::ostringstream k;
+          k << "converged-path site: isFlexible=" << yesNo(isFlexible_)
+            << " isConverged=" << yesNo(isConverged)
+            << " fgmresIter=" << (dIter.is_null() ? "null" : "ok")
+            << " opBlocked=" << yesNo(!dBlk.is_null())
+            << " -> " << (fire ? "calling invoke" : "NOT calling invoke");
+          std::ostringstream m;
+          m << k.str() << " (iters=" << block_gmres_iter->getNumIters() << ")";
+          print("B2", m.str(), k.str());
+        }
         if (isFlexible_ && isConverged) {
           auto fgmres_iter =
             Teuchos::rcp_dynamic_cast<BlockFGmresIter<ScalarType,MV,OP>>(
@@ -1389,6 +1444,23 @@ ReturnType BlockGmresSolMgr<ScalarType,MV,OP,DM>::solve() {
   if constexpr (std::is_same_v<ScalarType,  double> &&
                 std::is_same_v<MV, Thyra::MultiVectorBase<double>> &&
                 std::is_same_v<OP, Thyra::LinearOpBase<double>>) {
+    // Diagnostic B3: every check the stalled-path call site makes.
+    {
+      using namespace Belos::AdaptiveDiag;
+      auto dIter = Teuchos::rcp_dynamic_cast<BlockFGmresIter<ScalarType,MV,OP>>(block_gmres_iter);
+      auto dBlk = Teuchos::rcp_dynamic_cast<const Thyra::BlockedLinearOpBase<ScalarType>>(
+        problem_->getOperator());
+      const bool stalled = !isConverged || loaDetected_;
+      const bool fire = isFlexible_ && stalled && !dIter.is_null() && !dBlk.is_null();
+      std::ostringstream m;
+      m << "stalled-path site: isFlexible=" << yesNo(isFlexible_)
+        << " stalled=" << yesNo(stalled)
+        << " (isConverged=" << yesNo(isConverged) << " loaDetected=" << yesNo(loaDetected_) << ")"
+        << " fgmresIter=" << (dIter.is_null() ? "null" : "ok")
+        << " opBlocked=" << yesNo(!dBlk.is_null())
+        << " -> " << (fire ? "calling invoke" : (stalled ? "NOT calling invoke" : "not needed, solve converged"));
+      print("B3", m.str());
+    }
     if (isFlexible_ && (!isConverged || loaDetected_)) {
       auto fgmres_iter =
         Teuchos::rcp_dynamic_cast<BlockFGmresIter<ScalarType,MV,OP>>(block_gmres_iter);

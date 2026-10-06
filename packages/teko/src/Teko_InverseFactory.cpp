@@ -105,7 +105,7 @@ namespace Teko {
 // actually invokes cannot be dropped that way.
 namespace {
 void announceTrilinosBranchOnce(const char* site) {
-  static const char* const kBranch = "aidantgould/teko-reconfig-request";
+  static const char* const kBranch = "aidantgould/teko-reconfig-diag";
   // one line per site, not per call: a per-call line would swamp a real run
   static std::set<std::string> announced;
   if (!announced.insert(site).second) return;

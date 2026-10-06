@@ -17,6 +17,7 @@
 #include "Teuchos_Assert.hpp"
 #include "Teuchos_TimeMonitor.hpp"
 #include "Stratimikos_Config.h"
+#include "BelosAdaptiveDiag.hpp"
 #ifdef HAVE_STRATIMIKOS_THYRATPETRAADAPTERS
 #  include "Thyra_TpetraThyraWrappers.hpp"
 #  include <MatrixMarket_Tpetra.hpp>
@@ -660,6 +661,10 @@ BelosLinearOpWithSolve<Scalar>::solveImpl(
     if (nonnull(generalSolveCriteriaBelosStatusTest)) {
       iterativeSolver_->setUserConvStatusTest(generalSolveCriteriaBelosStatusTest);
     }
+    // Diagnostic S2: the solver manager actually about to run (for Block
+    // GMRES its description includes Flexible).
+    Belos::AdaptiveDiag::print("S2", "Stratimikos calling solve on "
+                               + iterativeSolver_->description());
     try {
       belosSolveStatus = iterativeSolver_->solve();
     }

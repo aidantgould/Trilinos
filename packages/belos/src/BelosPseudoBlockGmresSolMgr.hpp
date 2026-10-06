@@ -22,6 +22,7 @@
 #include "BelosDenseMatTraits.hpp"
 
 #include "BelosPseudoBlockGmresIter.hpp"
+#include "BelosAdaptiveDiag.hpp"
 #include "BelosOrthoManagerFactory.hpp"
 #include "BelosStatusTestFactory.hpp"
 #include "BelosStatusTestOutputFactory.hpp"
@@ -1166,6 +1167,19 @@ bool PseudoBlockGmresSolMgr<ScalarType,MV,OP,DM>::checkStatusTest() {
 template<class ScalarType, class MV, class OP, class DM>
 ReturnType PseudoBlockGmresSolMgr<ScalarType,MV,OP,DM>::solve() {
   ReturnType retType = Undetermined;
+
+  // Diagnostic P1: this solver has no adaptive hook call site, so a solve that
+  // only ever prints P1 (never B1) can never reach Teko's adaptiveLoop.
+  {
+    std::ostringstream m;
+    m << "PseudoBlockGmresSolMgr::solve entered (no adaptive hook in this solver): label="
+      << label_ << " SC=" << Belos::AdaptiveDiag::typeName<ScalarType>()
+      << " MV=" << Belos::AdaptiveDiag::typeName<MV>()
+      << " OP=" << Belos::AdaptiveDiag::typeName<OP>();
+    if (!Teuchos::is_null(problem_) && !Teuchos::is_null(problem_->getOperator()))
+      m << " op=" << Belos::AdaptiveDiag::describe(*problem_->getOperator());
+    Belos::AdaptiveDiag::print("P1", m.str());
+  }
   // Set the current parameters if they were not set before.
   // NOTE:  This may occur if the user generated the solver manager with the default constructor and
   // then didn't set any parameters using setParameters().

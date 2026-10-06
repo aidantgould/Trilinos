@@ -14,6 +14,8 @@
 #include "Thyra_BelosLinearOpWithSolveFactory_decl.hpp"
 #include "Thyra_BelosLinearOpWithSolve.hpp"
 #include "Thyra_ScaledAdjointLinearOpBase.hpp"
+#include "Thyra_BlockedLinearOpBase.hpp"
+#include "BelosAdaptiveDiag.hpp"
 
 #include "BelosBlockGmresSolMgr.hpp"
 #include "BelosPseudoBlockGmresSolMgr.hpp"
@@ -739,6 +741,28 @@ void BelosLinearOpWithSolveFactory<Scalar>::initializeOpImpl(
         );
     }
   }
+  // Diagnostic S1: the operator and preconditioner side Stratimikos hands
+  // Belos. The adaptive hook needs this operator to be blocked and the
+  // preconditioner on the right.
+  {
+    // Validation stores "Solver Type" as an enum, so read its string form
+    // through the validator, and never let a diagnostic throw.
+    std::string solverTypeName;
+    try {
+      solverTypeName = Teuchos::getStringValue<EBelosSolverType>(*paramList_, SolverType_name);
+    } catch (...) {
+      solverTypeName = "enum " + std::to_string(static_cast<int>(solverType_));
+    }
+    std::ostringstream m;
+    m << "Stratimikos Belos LOWS init: Solver Type=\"" << solverTypeName << "\""
+      << " opBlocked=" << Belos::AdaptiveDiag::yesNo(
+           nonnull(Teuchos::rcp_dynamic_cast<const BlockedLinearOpBase<Scalar>>(fwdOp)))
+      << " op=" << (nonnull(fwdOp) ? fwdOp->description() : std::string("null"))
+      << " leftPrec=" << (nonnull(lp->getLeftPrec()) ? "set" : "null")
+      << " rightPrec=" << (nonnull(lp->getRightPrec()) ? "set" : "null");
+    Belos::AdaptiveDiag::print("S1", m.str());
+  }
+
   if(myPrec.get()) {
     set_extra_data<RCP<PreconditionerBase<Scalar> > >(myPrec,"Belos::InternalPrec",
       Teuchos::inOutArg(lp), Teuchos::POST_DESTROY, false);

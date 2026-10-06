@@ -113,5 +113,10 @@ HookResult invoke(
     Teuchos::RCP<const Teuchos::ParameterList>                params,
     const SolveMetrics&                                       metrics);
 
+// Diagnostic branch: address of this libbelos copy's slot, and whether it holds
+// a hook. Two different addresses in one process mean two copies of the slot.
+const void* slotAddress();
+bool        hookIsSet();
+
 } // namespace AdaptiveHook
 } // namespace Belos
