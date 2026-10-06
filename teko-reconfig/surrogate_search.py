@@ -99,6 +99,12 @@ class SearchResult:
         """Every ordering evaluated, as plain lists (JSON-serializable)."""
         return [list(o) for o in self.results]
 
+    def iters_of(self, ordering):
+        """The surrogate iteration count of one ordering, or None if this
+        search did not score it."""
+        r = self.results.get(tuple(ordering))
+        return None if r is None else int(r["iters"])
+
 
 def blocks_from_request(request):
     """Slice a request's flat C_hat / b_hat into a BlockMatrix pair.

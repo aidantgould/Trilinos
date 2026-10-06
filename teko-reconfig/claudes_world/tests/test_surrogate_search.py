@@ -156,37 +156,96 @@ def test_search_on_a_recorded_request():
 
 # ── the watcher's use of it ───────────────────────────────────────────────
 
-def emit_test_orderings(value):
-    """Set EMIT_TEST_ORDERINGS and give back its previous value.
+def knobs(emit=False, send_use=True):
+    """Set EMIT_TEST_ORDERINGS and SEND_USE_ORDERING, and give back a function
+    that restores their previous values.
 
-    Set explicitly rather than assumed: it is a knob the owner flips between
-    runs, so a test that reads the module's current value tests the last edit
-    rather than the behavior.
+    Set explicitly rather than assumed: they are knobs the owner flips between
+    runs (and the environment can set), so a test that reads the module's
+    current values tests the last edit rather than the behavior.
     """
-    was = watcher.EMIT_TEST_ORDERINGS
-    watcher.EMIT_TEST_ORDERINGS = value
-    return was
+    was = watcher.EMIT_TEST_ORDERINGS, watcher.SEND_USE_ORDERING
+    watcher.EMIT_TEST_ORDERINGS, watcher.SEND_USE_ORDERING = emit, send_use
+
+    def restore():
+        watcher.EMIT_TEST_ORDERINGS, watcher.SEND_USE_ORDERING = was
+    return restore
 
 
-def test_choose_ordering_uses_the_search():
+def fallback_rows(n_blocks):
+    return [{"ordering": [0] * n_blocks, "surrogate_iters": None,
+             "surrogate_flags": ["use_ordering"]}]
+
+
+def test_choose_solves_sends_the_pick_flagged():
     req = fake_request()
-    was = emit_test_orderings(False)
+    restore = knobs(emit=False, send_use=True)
     try:
-        use, opt, tests = watcher.choose_ordering(req)
+        rows = watcher.choose_solves(req)
     finally:
-        emit_test_orderings(was)
-    assert use == opt and len(use) == req["n_blocks"]
-    assert tests == []
+        restore()
+    assert len(rows) == 1
+    (row,) = rows
+    assert list(row) == ["ordering", "surrogate_iters", "surrogate_flags"]
+    assert len(row["ordering"]) == req["n_blocks"]
+    assert row["surrogate_flags"] == ["use_ordering", "opt_ordering"]
+    assert isinstance(row["surrogate_iters"], int) and row["surrogate_iters"] > 0
 
 
-def test_choose_ordering_emits_test_orderings_when_asked():
+def test_choose_solves_withholds_use_ordering_when_asked():
     req = fake_request()
-    was = emit_test_orderings(True)
+    restore = knobs(emit=False, send_use=False)
     try:
-        _, _, tests = watcher.choose_ordering(req)
+        rows = watcher.choose_solves(req)
     finally:
-        emit_test_orderings(was)
-    assert len(tests) == 13     # every ordering the search scored
+        restore()
+    assert [r["surrogate_flags"] for r in rows] == [["opt_ordering"]]
+
+
+def test_choose_solves_emits_every_ordering_once_when_asked():
+    req = fake_request()
+    restore = knobs(emit=True, send_use=True)
+    try:
+        rows = watcher.choose_solves(req)
+        result = surrogate_search.search(req)
+    finally:
+        restore()
+    orderings = [tuple(r["ordering"]) for r in rows]
+    assert len(rows) == 13                      # every ordering the search scored
+    assert len(set(orderings)) == 13            # the pick is merged, not repeated
+    assert rows[0]["surrogate_flags"] == ["use_ordering", "opt_ordering"]
+    assert all(r["surrogate_flags"] == [] for r in rows[1:])
+    for r in rows:                              # each carries its own prediction
+        assert r["surrogate_iters"] == result.iters_of(r["ordering"])
+
+
+def test_add_row_merges_flags_by_ordering():
+    rows = {}
+    watcher.add_row(rows, [0, 1], 4, ["opt_ordering"])
+    watcher.add_row(rows, [0, 0], 2)
+    watcher.add_row(rows, [0, 1], 4, ["use_ordering", "opt_ordering"])
+    assert list(rows.values()) == [
+        {"ordering": [0, 1], "surrogate_iters": 4,
+         "surrogate_flags": ["opt_ordering", "use_ordering"]},
+        {"ordering": [0, 0], "surrogate_iters": 2, "surrogate_flags": []},
+    ]
+
+
+def test_env_flag():
+    import os
+    name = "TEKO_WATCHER_TEST_ENV_FLAG"
+    try:
+        os.environ.pop(name, None)
+        assert watcher.env_flag(name, True) is True
+        assert watcher.env_flag(name, False) is False
+        for falsy in ("", "0", "false", "FALSE"):
+            os.environ[name] = falsy
+            assert watcher.env_flag(name, True) is False
+        for truthy in ("1", "yes", "true"):
+            os.environ[name] = truthy
+            assert watcher.env_flag(name, False) is True
+    finally:
+        os.environ.pop(name, None)
 
 
 def test_search_on_step_gate():
@@ -205,7 +264,7 @@ def test_search_on_step_gate():
         watcher.SEARCH_ON_STEPS = real
 
 
-def test_choose_ordering_skips_steps_outside_the_list():
+def test_choose_solves_skips_steps_outside_the_list():
     req = fake_request()
     searched = []
     real_search, real_steps = surrogate_search.search, watcher.SEARCH_ON_STEPS
@@ -216,19 +275,21 @@ def test_choose_ordering_skips_steps_outside_the_list():
 
     surrogate_search.search = counting_search
     watcher.SEARCH_ON_STEPS = [1]
+    restore = knobs(emit=False, send_use=True)
     try:
-        skipped = watcher.choose_ordering(req, request_id=0)
-        ran = watcher.choose_ordering(req, request_id=1)
+        skipped = watcher.choose_solves(req, request_id=0)
+        ran = watcher.choose_solves(req, request_id=1)
     finally:
         surrogate_search.search = real_search
         watcher.SEARCH_ON_STEPS = real_steps
+        restore()
 
-    assert skipped == ([0, 0, 0], None, [])     # fallback, and no search ran
-    assert ran[0] != [0, 0, 0] or ran[1] is not None
+    assert skipped == fallback_rows(3)          # fallback, and no search ran
+    assert ran[0]["surrogate_iters"] is not None
     assert len(searched) == 1                   # only step 1 paid for a search
 
 
-def test_choose_ordering_empty_list_never_searches():
+def test_choose_solves_empty_list_never_searches():
     req = fake_request()
     real_search, real_steps = surrogate_search.search, watcher.SEARCH_ON_STEPS
 
@@ -239,29 +300,31 @@ def test_choose_ordering_empty_list_never_searches():
     watcher.SEARCH_ON_STEPS = []
     try:
         for step in (0, 1, 2):
-            assert watcher.choose_ordering(req, request_id=step) == ([0, 0, 0], None, [])
+            assert watcher.choose_solves(req, request_id=step) == fallback_rows(3)
     finally:
         surrogate_search.search = real_search
         watcher.SEARCH_ON_STEPS = real_steps
 
 
-def test_choose_ordering_falls_back_when_pyautoteko_is_missing(monkeypatch=None):
+def test_choose_solves_falls_back_when_pyautoteko_is_missing(monkeypatch=None):
     req = fake_request(n_blocks=5, ranks=(2, 2, 2, 2, 2))
     real_available = surrogate_search.available
     real_reason = surrogate_search.unavailable_reason
     surrogate_search.available = lambda: False
     surrogate_search.unavailable_reason = (
         lambda: "ModuleNotFoundError: No module named 'block_matrix'")
+    # the fallback keeps use_ordering even with it withheld from picks
+    restore = knobs(emit=True, send_use=False)
     try:
-        use, opt, tests = watcher.choose_ordering(req)
+        rows = watcher.choose_solves(req)
     finally:
         surrogate_search.available = real_available
         surrogate_search.unavailable_reason = real_reason
-    assert use == [0, 0, 0, 0, 0]
-    assert opt is None and tests == []
+        restore()
+    assert rows == fallback_rows(5)
 
 
-def test_choose_ordering_falls_back_when_the_search_raises():
+def test_choose_solves_falls_back_when_the_search_raises():
     req = fake_request()
     real = surrogate_search.search
 
@@ -270,35 +333,50 @@ def test_choose_ordering_falls_back_when_the_search_raises():
 
     surrogate_search.search = boom
     try:
-        use, opt, tests = watcher.choose_ordering(req)
+        rows = watcher.choose_solves(req)
     finally:
         surrogate_search.search = real
-    assert use == [0, 0, 0] and opt is None and tests == []
+    assert rows == fallback_rows(3)
 
 
 def test_write_reconfig_payload(tmp_path=None):
     import tempfile
+    rows = [watcher.solve_row([0, 1, 1], 3, ["use_ordering", "opt_ordering"]),
+            watcher.solve_row([0, 0, 0], 1),
+            watcher.solve_row([0, 1, 2])]
     with tempfile.TemporaryDirectory() as d:
-        path = Path(d) / "s0_reconfig.json"
-        watcher.write_reconfig([0, 1, 1], str(path), opt_ordering=[0, 1, 1],
-                               test_orderings=[[0, 0, 0], [0, 1, 1]])
-        payload = json.loads(path.read_text())
-        assert payload["selection_mode"] == "chosen"
-        assert payload["use_ordering"] == [0, 1, 1]
-        assert payload["opt_ordering"] == [0, 1, 1]
-        assert payload["exh_opt_ordering"] == []
-        assert payload["test_orderings"] == [[0, 0, 0], [0, 1, 1]]
-        assert not (Path(d) / "s0_reconfig.json.tmp").exists()
+        path = Path(d) / "s4_reconfig.json"
+        watcher.write_reconfig(rows, str(path), 4)
+        text = path.read_text()
+        payload = json.loads(text)
+        assert list(payload) == ["request_id", "solves"]
+        assert payload["request_id"] == 4
+        assert payload["solves"] == [
+            {"ordering": [0, 1, 1], "surrogate_iters": 3,
+             "surrogate_flags": ["use_ordering", "opt_ordering"]},
+            {"ordering": [0, 0, 0], "surrogate_iters": 1, "surrogate_flags": []},
+            {"ordering": [0, 1, 2], "surrogate_iters": None, "surrogate_flags": []},
+        ]
+        assert list(payload["solves"][0]) == ["ordering", "surrogate_iters",
+                                              "surrogate_flags"]
+        assert '"ordering": [0, 1, 1]' in text  # arrays inline, as in conv.json
+        assert not (Path(d) / "s4_reconfig.json.tmp").exists()
 
 
-def test_write_reconfig_defaults_opt_to_use():
+def test_write_reconfig_with_no_rows():
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "s0_reconfig.json"
-        watcher.write_reconfig([0, 0, 0], str(path))
-        payload = json.loads(path.read_text())
-        assert payload["opt_ordering"] == [0, 0, 0]
-        assert payload["test_orderings"] == []
+        watcher.write_reconfig([], str(path), 0)
+        assert json.loads(path.read_text()) == {"request_id": 0, "solves": []}
+
+
+def test_iters_of():
+    req = fake_request()
+    result = surrogate_search.search(req)
+    for ordering, r in result.results.items():
+        assert result.iters_of(list(ordering)) == r["iters"]
+    assert result.iters_of([0, 1, 2, 3]) is None    # never scored
 
 
 def test_fallback_ordering():

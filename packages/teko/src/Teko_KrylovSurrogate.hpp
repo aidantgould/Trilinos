@@ -7,7 +7,7 @@
 //     Krylov state via per-block Gram-matrix thin SVDs) and the shared type
 //     aliases.
 //   * Teko_KrylovReconfigIO.hpp   — the JSON file formats (request / reconfig /
-//     conv / solved) and the watcher handshake.
+//     conv) and the watcher handshake.
 //   * Teko_KrylovReconfigPrec.hpp — assembling the reconfigured ("as-if-
 //     original") flat blocked system and its preconditioner from an ordering.
 //
@@ -24,11 +24,13 @@
 //   2. Polls for s<N>_reconfig.json in the same directory (left in place after
 //      being read — its presence is how wait_for_request.py recognizes an
 //      already-answered request).
-//   3. Optionally sweeps/times each candidate ordering on a fresh flat blocked
-//      operator (as if the application had been called with that grouping
-//      originally), selecting per selection_mode, and re-solves.
-//   4. Overwrites the LHS with the selected solve's result and writes
-//      s<N>_conv.json (and s<N>_solved.json for a sweep).
+//   3. Solves and times each requested ordering as a test on a fresh flat
+//      blocked operator (as if the application had been called with that
+//      grouping originally). The row flagged use_ordering, if any, is not
+//      tested: it is the final solve. Without one, the test that performed
+//      best is re-solved as the final.
+//   4. Overwrites the LHS with the final solve's result and writes
+//      s<N>_conv.json, one row per solve that ran.
 //
 // Depends on: Belos, Thyra, Tpetra, Teko, Stratimikos, Teuchos.
 // No external JSON library — JSON is written/parsed manually.
@@ -150,7 +152,7 @@ public:
 // every rank returns a non-converged result without entering the collective
 // solve — so one bad candidate in a sweep can't deadlock the run (other ranks
 // would otherwise hang in solver.solve()).
-inline OrderingResult solveOrdering(
+inline SolveRecord solveOrdering(
     const std::vector<int>&                            ordering,
     Teuchos::RCP<const Thyra::BlockedLinearOpBase<SC>> A_blocked,
     int                                                nb,
@@ -162,7 +164,7 @@ inline OrderingResult solveOrdering(
     double                                             b_norm,
     bool                                               writeToLHS)
 {
-    OrderingResult r;
+    SolveRecord r;
     r.ordering         = ordering;
     r.initial_residual = b_norm;
 
@@ -214,7 +216,7 @@ inline OrderingResult solveOrdering(
     // early, so it would otherwise report converged with a low iteration count,
     // a small residual and a short iterate time: it would win every tiebreaker
     // in both selection comparators. Recording the true residual here is also
-    // what makes final_residual in solved.json/conv.json meaningful.
+    // what makes final_residual in conv.json meaningful.
     const double tol = solverParams->get(
         "Convergence Tolerance",
         static_cast<double>(Belos::DefaultSolverParameters::convTol));
@@ -222,7 +224,7 @@ inline OrderingResult solveOrdering(
         Teuchos::rcp_dynamic_cast<const Thyra::LinearOpBase<SC>>(recon.flatOp),
         b_new, x_new);
 
-    r.iterations            = solver.getNumIters();
+    r.iters                 = solver.getNumIters();
     r.converged             = (ret == Belos::Converged) &&
                               (true_res <= kResidualSlack * tol);
     r.final_residual        = true_res;
@@ -371,9 +373,26 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
         Teuchos::rcp_dynamic_cast<const Thyra::LinearOpBase<SC>>(A_blocked),
         problem->getRHS(), problem->getLHS());
 
-    SolveStats s1{solve1_metrics.num_iters, b_norm, solve1_true_res,
-                  solve1_factor_sec, solve1_metrics.wall_time_sec,
-                  solve1_factor_sec + solve1_metrics.wall_time_sec};
+    // The initial row of conv.json. Its ordering is the application's own
+    // blocking, every block its own group, and its converged flag gets the same
+    // true-residual check every reconfigured solve gets in solveOrdering.
+    const double solve1_tol =
+        orig_params->isParameter("Convergence Tolerance")
+            ? orig_params->get<double>("Convergence Tolerance")
+            : static_cast<double>(Belos::DefaultSolverParameters::convTol);
+    SolveRecord s1;
+    s1.ordering.resize(nb);
+    std::iota(s1.ordering.begin(), s1.ordering.end(), 0);
+    s1.iters                 = solve1_metrics.num_iters;
+    s1.type                  = "initial";
+    s1.converged             = solve1_metrics.converged &&
+                               (solve1_true_res <= kResidualSlack * solve1_tol);
+    s1.initial_residual      = b_norm;
+    s1.final_residual        = solve1_true_res;
+    s1.factor_wall_time_sec  = solve1_factor_sec;
+    s1.iterate_wall_time_sec = solve1_metrics.wall_time_sec;
+    s1.total_wall_time_sec   = solve1_factor_sec + solve1_metrics.wall_time_sec;
+    std::vector<SolveRecord> records{s1};
 
     // A stalled first solve (hit max iterations / lost accuracy) is NOT a dead
     // end — it is exactly the case reconfiguration should rescue, and the
@@ -397,49 +416,54 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
 
     // ── Phase 2: wait for s<N>_reconfig.json ───────────────────────────────
     // The response arrives from an external process via the filesystem, so
-    // rank 0 polls and the result is broadcast to all ranks.
+    // rank 0 polls. Every rank needs the orderings and which row (if any) is
+    // flagged use_ordering; the rest of each row (surrogate_iters, the flags)
+    // only goes into conv.json, which rank 0 writes, so it stays on rank 0.
     ReconfigResponse resp;
     if (rank == 0) resp = waitForReconfig(requests_dir, request_id);
 
-    // Broadcast use_ordering.
-    int uo_size = static_cast<int>(resp.use_ordering.size());
-    Teuchos::broadcast(*comm, 0, 1, &uo_size);
-    resp.use_ordering.resize(uo_size);
-    if (uo_size > 0)
-        Teuchos::broadcast(*comm, 0, uo_size, resp.use_ordering.data());
-
-    // Broadcast selection_mode as an int code (0 chosen, 1 best_conv, 2 best_time).
-    int mode_code = 0;
-    if (rank == 0) {
-        if      (resp.selection_mode == "best_conv") mode_code = 1;
-        else if (resp.selection_mode == "best_time") mode_code = 2;
-    }
-    Teuchos::broadcast(*comm, 0, 1, &mode_code);
-    const char* mode_names[3] = {"chosen", "best_conv", "best_time"};
-    const std::string selection_mode = mode_names[mode_code];
-
-    // Broadcast test_orderings (count, then each ordering's length + data).
-    int num_tests = static_cast<int>(resp.test_orderings.size());
-    Teuchos::broadcast(*comm, 0, 1, &num_tests);
-    if (rank != 0) resp.test_orderings.assign(num_tests, std::vector<int>());
-    for (int t = 0; t < num_tests; ++t) {
-        int len = (rank == 0) ? static_cast<int>(resp.test_orderings[t].size()) : 0;
+    int num_solves = static_cast<int>(resp.solves.size());
+    Teuchos::broadcast(*comm, 0, 1, &num_solves);
+    if (rank != 0) resp.solves.assign(num_solves, RequestedSolve());
+    for (int t = 0; t < num_solves; ++t) {
+        auto& ord = resp.solves[t].ordering;
+        int len = static_cast<int>(ord.size());
         Teuchos::broadcast(*comm, 0, 1, &len);
-        resp.test_orderings[t].resize(len);
-        if (len > 0)
-            Teuchos::broadcast(*comm, 0, len, resp.test_orderings[t].data());
+        ord.resize(len);
+        if (len > 0) Teuchos::broadcast(*comm, 0, len, ord.data());
     }
 
-    if (resp.use_ordering.empty()) {
+    // The first row flagged use_ordering is the final solve; -1 means none was,
+    // and the final is chosen from how the tests actually performed.
+    int use_index = -1;
+    if (rank == 0) {
+        for (int t = 0; t < num_solves; ++t)
+            if (hasFlag(resp.solves[t], kUseOrderingFlag)) { use_index = t; break; }
+    }
+    Teuchos::broadcast(*comm, 0, 1, &use_index);
+
+    // The initial solve's ordering may also have been scored by the surrogate;
+    // if the watcher sent it, the initial row carries that prediction too.
+    if (rank == 0) {
+        for (const auto& s : resp.solves)
+            if (s.ordering == records[0].ordering) {
+                copySurrogateFields(s, records[0]);
+                break;
+            }
+    }
+
+    if (num_solves == 0) {
         if (rank == 0) {
-            std::cerr << "[TekoAdaptive] no ordering received; returning first "
-                         "solve result.\n";
-            writeConvergenceJson(convergence_dir, request_id, s1, nullptr);
+            std::cerr << "[TekoAdaptive] "
+                      << (resp.received ? "reconfig requested no solves"
+                                        : "no reconfig received")
+                      << "; returning first solve result.\n";
+            writeConvergenceJson(convergence_dir, request_id, records);
         }
         return {};
     }
 
-    // ── Phase 3: determine method, then sweep / select / re-solve ──────────
+    // ── Phase 3: determine method, then test / select / final solve ────────
     // Forced to block Gauss-Seidel (block lower triangular) regardless of what
     // the first solve used. Previously this dynamic-cast probed
     // problem->getRightPrec() for BlockLowerTriInverseOp and fell back to
@@ -456,92 +480,96 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
     // rebuilding the Stratimikos solve strategy once per ordering).
     auto invFact = makeBlockSolverInverseFactory();
 
-    // Warm-up before a timed sweep. The first build+solve inside this hook
-    // pays one-time costs (kernel first-touch, Stratimikos/Ifpack2 setup
-    // paths) that the factorization warm-up does not cover; left unaddressed
-    // they would be charged entirely to the first swept ordering and bias
-    // best_time. When there is a sweep to time, run one throwaway solve on the
-    // identity (all-separate) ordering first so every recorded candidate is
-    // measured warm. The result is discarded (writeToLHS = false).
-    if (!resp.test_orderings.empty()) {
+    // Every requested row except the use_ordering one is a test.
+    std::vector<int> test_rows;
+    for (int t = 0; t < num_solves; ++t)
+        if (t != use_index) test_rows.push_back(t);
+
+    // Warm-up before timed tests. The first build+solve inside this hook pays
+    // one-time costs (kernel first-touch, Stratimikos/Ifpack2 setup paths)
+    // that the factorization warm-up does not cover; left unaddressed they
+    // would be charged entirely to the first test and bias the best-time pick.
+    // When there are tests to time, run one throwaway solve on the identity
+    // (all-separate) ordering first so every recorded test is measured warm.
+    // The result is discarded (writeToLHS = false) and not recorded.
+    if (!test_rows.empty()) {
         std::vector<int> identity(nb);
         std::iota(identity.begin(), identity.end(), 0);
         solveOrdering(identity, A_blocked, nb, method, invFact, problem,
                       orig_params, comm, b_norm, /*writeToLHS=*/false);
     }
 
-    // Sweep: build, solve, and time every candidate ordering on the freshly
-    // assembled flat (as-if-original) system, so all candidates are timed
-    // comparably to the first solve. Skipped when no test_orderings were given.
-    std::vector<OrderingResult> sweep;
-    sweep.reserve(resp.test_orderings.size());
-    for (const auto& ord : resp.test_orderings)
-        sweep.push_back(solveOrdering(ord, A_blocked, nb, method, invFact, problem,
-                                      orig_params, comm, b_norm, /*writeToLHS=*/false));
+    // Tests: build, solve, and time each on the freshly assembled flat
+    // (as-if-original) system, so all are timed comparably to the first solve.
+    std::vector<SolveRecord> tests;
+    tests.reserve(test_rows.size());
+    for (int t : test_rows) {
+        SolveRecord rec = solveOrdering(resp.solves[t].ordering, A_blocked, nb, method,
+                                        invFact, problem, orig_params, comm, b_norm,
+                                        /*writeToLHS=*/false);
+        rec.type = "test";
+        copySurrogateFields(resp.solves[t], rec);
+        tests.push_back(std::move(rec));
+    }
 
-    // Selection. "chosen" returns use_ordering; "best_conv"/"best_time" pick
-    // from the sweep. Comparators operate only on cross-rank-reduced,
-    // deterministic quantities, so every rank selects the same ordering.
-    auto convBetter = [](const OrderingResult& a, const OrderingResult& b) {
+    // Selection. use_ordering, when given, is respected. Otherwise the best
+    // test wins: converged first, then least total wall time, and among tests
+    // that all failed the least bad by convergence. The comparators operate
+    // only on cross-rank-reduced, deterministic quantities, so every rank
+    // selects the same row.
+    auto convBetter = [](const SolveRecord& a, const SolveRecord& b) {
         if (a.converged != b.converged) return a.converged;          // converged first
-        if (a.iterations != b.iterations) return a.iterations < b.iterations;
+        if (a.iters != b.iters) return a.iters < b.iters;
         return a.final_residual < b.final_residual;
     };
-    auto timeBetter = [&](const OrderingResult& a, const OrderingResult& b) {
+    auto timeBetter = [&](const SolveRecord& a, const SolveRecord& b) {
         if (a.converged != b.converged) return a.converged;
         if (a.converged && b.converged)
             return a.total_wall_time_sec < b.total_wall_time_sec;
         return convBetter(a, b);  // neither converged: least-bad by convergence
     };
 
-    std::vector<int> selected = resp.use_ordering;
-    int selected_index = -1;
-    if (!sweep.empty() && mode_code != 0) {
+    int selected_row = use_index;
+    std::string selection_mode = kUseOrderingFlag;
+    if (use_index < 0) {
         int best = 0;
-        for (int i = 1; i < static_cast<int>(sweep.size()); ++i) {
-            const bool better = (mode_code == 1) ? convBetter(sweep[i], sweep[best])
-                                                 : timeBetter(sweep[i], sweep[best]);
-            if (better) best = i;
-        }
-        selected = sweep[best].ordering;
-        selected_index = best;
-    } else {
-        // "chosen" (or no candidates): record where use_ordering sits, if present.
-        for (int i = 0; i < static_cast<int>(sweep.size()); ++i)
-            if (sweep[i].ordering == resp.use_ordering) { selected_index = i; break; }
+        for (int i = 1; i < static_cast<int>(tests.size()); ++i)
+            if (timeBetter(tests[i], tests[best])) best = i;
+        selected_row   = test_rows[best];
+        selection_mode = "best_time";
     }
 
-    if (rank == 0 && !sweep.empty())
-        writeSolvedJson(convergence_dir, request_id, selection_mode,
-                        sweep, selected_index, selected);
-
-    // ── Phase 4: authoritative solve of the selected ordering ──────────────
-    // Re-solve the selected ordering (no cached solution is kept) and write
-    // its result into the LHS the application reads back.
-    OrderingResult finalRes = solveOrdering(selected, A_blocked, nb, method, invFact, problem,
-                                            orig_params, comm, b_norm, /*writeToLHS=*/true);
-
-    SolveStats s2{finalRes.iterations, b_norm, finalRes.final_residual,
-                  finalRes.factor_wall_time_sec, finalRes.iterate_wall_time_sec,
-                  finalRes.total_wall_time_sec};
-    if (rank == 0) writeConvergenceJson(convergence_dir, request_id, s1, &s2);
+    // ── Phase 4: the final solve ───────────────────────────────────────────
+    // Solve the selected ordering (a best-time pick is re-solved, since no
+    // test keeps its solution) and write its result into the LHS the
+    // application reads back.
+    SolveRecord finalRes = solveOrdering(resp.solves[selected_row].ordering, A_blocked,
+                                         nb, method, invFact, problem, orig_params,
+                                         comm, b_norm, /*writeToLHS=*/true);
+    finalRes.type = "final from selection mode " + selection_mode;
+    copySurrogateFields(resp.solves[selected_row], finalRes);
 
     if (rank == 0) {
+        records.insert(records.end(), tests.begin(), tests.end());
+        records.push_back(finalRes);
+        writeConvergenceJson(convergence_dir, request_id, records);
+
         if (!finalRes.converged)
-            std::cerr << "[TekoAdaptive] selected solve did not converge ("
-                      << finalRes.iterations << " iters). Using first result.\n";
+            std::cerr << "[TekoAdaptive] final solve did not converge ("
+                      << finalRes.iters << " iters). Using first result.\n";
         else
-            std::cout << "[TekoAdaptive] selected solve (" << selection_mode
-                      << ") converged (" << finalRes.iterations << " iters).\n";
+            std::cout << "[TekoAdaptive] final solve (" << selection_mode
+                      << ") converged (" << finalRes.iters << " iters).\n";
     }
 
-    // Report the re-solve back to the manager. Only when it converged (and so
-    // wrote its result into the LHS) does this override the manager's result —
-    // turning a rescued stall into a reported success. If it did not converge,
-    // converged stays false and the manager keeps its own (first-solve) result.
+    // Report the final solve back to the manager. Only when it converged (and
+    // so wrote its result into the LHS) does this override the manager's
+    // result — turning a rescued stall into a reported success. If it did not
+    // converge, converged stays false and the manager keeps its own
+    // (first-solve) result.
     Belos::AdaptiveHook::HookResult result;
     result.converged    = finalRes.converged;
-    result.num_iters    = finalRes.iterations;
+    result.num_iters    = finalRes.iters;
     result.achieved_tol = finalRes.final_residual;
     return result;
 }

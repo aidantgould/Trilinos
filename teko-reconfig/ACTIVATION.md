@@ -7,9 +7,11 @@ GMRES solve `Belos::BlockGmresSolMgr::solve()` calls a hook that `libteko`
 registers at load time (`Teko_KrylovSurrogateInit.cpp` →
 `Belos::AdaptiveHook::registerHook`). The hook
 (`Teko::KrylovSurrogate::adaptiveLoop`) builds the surrogate, gets a response
-from the watcher (`use_ordering` plus optional `test_orderings` /
-`selection_mode`), optionally builds-and-times each candidate ordering (written
-to `s<N>_solved.json`), and re-solves with the selected one.
+from the watcher (a list of solves, each an ordering with its surrogate
+prediction and flags), builds-and-times each requested ordering as a test,
+and finishes with a final solve: the row flagged `use_ordering`, or failing
+that the test that converged fastest. Every solve is recorded in
+`s<N>_conv.json`.
 
 **This fires on both converged and stalled first solves.** A solve that hit its
 max-iteration limit (`curDim > 0`) is exactly the case reconfiguration should
@@ -18,8 +20,8 @@ data, and the re-solve runs. If that re-solve converges, the hook reports it
 back and `BlockGmresSolMgr::solve()` returns **converged** with the re-solve's
 iteration count / residual — so a deliberately short, low-max-iter first solve
 that stalls is rescued and the caller sees success rather than the original
-stall. `s<N>_conv.json` records both `solve1` (the stall: iterations == max
-iters) and `solve2` (the rescue). Caveat: the re-solve inherits the first
+stall. `s<N>_conv.json` records both the initial row (the stall: `iters` ==
+max iters) and the final row (the rescue). Caveat: the re-solve inherits the first
 solve's parameters, including `Maximum Iterations` — so if max-iters is set
 very low for cheap data-gathering, the re-solve is capped at that same low
 value and may not converge; give it a larger budget if you need the rescue to
@@ -44,7 +46,9 @@ concept each); chase references by file, not just line:
 | `TEKO_ADAPTIVE_RECONFIG` | [`Teko_KrylovSurrogate.hpp:228`](../packages/teko/src/Teko_KrylovSurrogate.hpp#L228) | unset → inert |
 | `TEKO_RECONFIG_REQUESTS_DIR` | [`Teko_KrylovSurrogate.hpp`](../packages/teko/src/Teko_KrylovSurrogate.hpp) | `$PWD/teko-reconfig-requests`, via `defaultRequestsDir()` |
 | `TEKO_FACTOR_WARMUP` | [`Teko_InverseFactory.cpp:198`](../packages/teko/src/Teko_InverseFactory.cpp#L198) | follows `TEKO_ADAPTIVE_RECONFIG` |
-| `TEKO_WATCHER_IDLE_TIMEOUT` | [`wait_for_request.py:48`](wait_for_request.py#L48) | 1000 s |
+| `TEKO_WATCHER_IDLE_TIMEOUT` | [`wait_for_request.py`](wait_for_request.py) | 1000 s |
+| `TEKO_WATCHER_EMIT_TEST_ORDERINGS` | [`wait_for_request.py`](wait_for_request.py) | off |
+| `TEKO_WATCHER_SEND_USE_ORDERING` | [`wait_for_request.py`](wait_for_request.py) | on |
 
 ## What else the flag now controls
 
@@ -113,15 +117,15 @@ were also timed twice.
 
 All files live in the requests dir and are named `s<N>_*.json`, where `N` is a
 monotonic id chosen by `nextRequestNumber()` = max existing id + 1 over
-`s<N>_request.json` / `_conv.json` / `_solved.json` (so ids are never reused
-within a run; the Python interface wipes them at startup so each run restarts
-at `s0`). Every file is written to `*.tmp` and atomically renamed, so a reader
+`s<N>_request.json` / `_conv.json` and the retired `_solved.json` (so ids are
+never reused within a run; the Python interface wipes them at startup so each
+run restarts at `s0`). Every file is written to `*.tmp` and atomically renamed, so a reader
 never sees a half-written file. Per request `N` the exchange is:
 
 ```
  C++  --s<N>_request.json-->  watcher
  C++  <--s<N>_reconfig.json--  watcher
- C++  --s<N>_conv.json (timings) , s<N>_solved.json (sweep)-->  (results)
+ C++  --s<N>_conv.json (every solve that ran)-->  (results)
 ```
 
 `s<N>_reconfig.json` is left in place after being read; its presence is how the
@@ -143,76 +147,95 @@ and Krylov rank only (never the global problem size `n`).
 }
 ```
 
-### `s<N>_reconfig.json` — watcher → C++ (the response)
-The watcher's answer. C++ reads `use_ordering` (required), `selection_mode`
-(optional, default `"chosen"`), and `test_orderings` (optional); `opt_ordering`
-and `exh_opt_ordering` are written but not consumed by C++ (reserved for
-recording the surrogate-search vs exhaustive-search picks).
+### `s<N>_reconfig.json` — watcher → C++ (the solves requested)
+The watcher's answer: one row per solve it wants, in the order it wants them.
 ```json
 {
-  "selection_mode": "chosen",      // "chosen" | "best_conv" | "best_time"
-  "use_ordering": [0, 0, 1],       // applied in "chosen" mode
-  "opt_ordering": [0, 0, 1],       // record-only (surrogate's pick)
-  "exh_opt_ordering": [],          // record-only (exhaustive pick; blank for now)
-  "test_orderings": [[0,1,2],[0,0,1],[0,0,0]]  // candidates to build/solve/time; may be []
+  "request_id": 3,
+  "solves": [
+    {
+      "ordering": [0, 0, 0],
+      "surrogate_iters": 2,                          // null if no search ran
+      "surrogate_flags": ["use_ordering", "opt_ordering"]
+    },
+    {
+      "ordering": [0, 1, 2],
+      "surrogate_iters": 4,
+      "surrogate_flags": []
+    }
+  ]
 }
 ```
 An **ordering** is a restricted-growth vector: `ordering[k] = g` puts original
 block `k` into new group `g` (group ids contiguous from 0). A single-member
 group is kept as-is; a multi-member group is assembled into one monolithic
-block and factored jointly. `selection_mode` decides which ordering is applied
-and returned:
-- **`chosen`** — apply `use_ordering`. The `test_orderings` sweep, if present,
-  is still built/timed and recorded, but `use_ordering` is what's returned.
-- **`best_conv`** — sweep all `test_orderings`, return the one with the best
-  convergence (fewest iterations; ties → lower residual; converged first).
-- **`best_time`** — sweep all `test_orderings`, return the fastest
-  (factor + iterate wall time) among those that converged.
+block and factored jointly. No ordering appears on two rows: a row carrying
+several roles carries several flags.
 
-### `s<N>_conv.json` — C++ output (per-solve timings)
-The first solve vs. the applied re-solve. `solve2` is `null` if no re-solve
-happened (e.g. the watcher timed out). On a rescued stall, `solve1` is the
-stall (`iterations` == max iters) and `solve2` the converged rescue.
+Flags (`surrogate_flags`, a row may have any number):
+- **`use_ordering`**: apply this ordering. It is the final solve and is not
+  also run as a test. If several rows carry it, the first wins, with a warning.
+- **`opt_ordering`**: the surrogate search's pick. Record only.
+- **`exh_opt_ordering`**: reserved for an exhaustive search's pick. Accepted
+  and recorded, never set by the watcher yet.
+
+What C++ does with the rows:
+- Every row except the `use_ordering` one is solved as a **test**, in order.
+- The **final** solve is the `use_ordering` row if there is one. Otherwise it is
+  the best test, re-solved: converged first, then least total (factor +
+  iterate) wall time, and among tests that all failed, fewest iterations then
+  smallest residual.
+- No rows (or no answer before the timeout): no re-solve, and conv.json holds
+  the initial row only.
+
+### `s<N>_conv.json` — C++ output (every solve that ran)
+One row per solve in execution order: the initial (the application's own
+solve), the tests in reconfig order, the final. Every reconfig row comes back
+with its `surrogate_iters` and `surrogate_flags`, so this file holds everything
+the reconfig did, plus what actually happened.
 ```json
 {
-  "request_id": 2,
-  "solve1": {
-    "iterations": 25,
-    "initial_residual": 9.05, "final_residual": 1.1e-8,
-    "factor_wall_time_sec": 0.41, "iterate_wall_time_sec": 0.55,
-    "total_wall_time_sec": 0.96, "wall_time_sec": 0.96  // == total (legacy alias)
-  },
-  "solve2": { ... same shape ... }   // or null
-}
-```
-
-### `s<N>_solved.json` — C++ output (the sweep, only when `test_orderings` given)
-Every candidate ordering built/solved/timed on the as-if-original flat system,
-plus which one was selected. `selected_index` is the row in `results` that was
-returned (or -1 if the selected ordering — e.g. `use_ordering` in `chosen`
-mode — isn't among the candidates).
-```json
-{
-  "selection_mode": "best_conv",
-  "request_id": 2,
-  "selected_index": 0,
-  "selected_ordering": [0, 0, 0],
-  "results": [
-    { "ordering": [0,0,0], "iterations": 1, "converged": true,
-      "initial_residual": 9.05, "final_residual": 1.5e-16,
-      "factor_wall_time_sec": 0.11, "iterate_wall_time_sec": 0.09,
-      "total_wall_time_sec": 0.20 },
-    ...
+  "request_id": 3,
+  "solves": [
+    {
+      "ordering": [0, 1, 2],
+      "surrogate_iters": 4,
+      "iters": 3,
+      "type": "initial",
+      "surrogate_flags": [],
+      "converged": true,
+      "initial_residual": 9.06,
+      "final_residual": 5.1e-16,
+      "factor_wall_time_sec": 0.0005,
+      "iterate_wall_time_sec": 0.0022,
+      "total_wall_time_sec": 0.0027
+    },
+    { "ordering": [0, 1, 2], ..., "type": "test", ... },
+    { "ordering": [0, 0, 0], ..., "type": "final from selection mode use_ordering",
+      "surrogate_flags": ["use_ordering", "opt_ordering"], ... }
   ]
 }
 ```
-All wall times in `conv.json`/`solved.json` are the cross-rank maximum
-(critical path), so they're identical on every rank and time-based selection
-is deterministic.
+- `type` is `"initial"`, `"test"`, or `"final from selection mode <mode>"`,
+  with `<mode>` either `use_ordering` or `best_time`.
+- The initial row's ordering is the application's own blocking,
+  `[0, 1, ..., nb-1]`. Its `surrogate_iters` and `surrogate_flags` are copied
+  from the reconfig row with that ordering when there is one, else `null` and
+  `[]`. It ran the application's preconditioner, not necessarily the block
+  Gauss-Seidel every test and final run.
+- With no `use_ordering`, the best test appears twice, as a test and as the
+  final, because no test keeps its solution vector.
+- A number that is not finite (a NaN residual from a solve that broke down) is
+  written `null`.
+- All wall times are the cross-rank maximum (critical path), so they're
+  identical on every rank and the best-time pick is deterministic.
+
+`s<N>_solved.json`, which held the test sweep, is retired: conv.json carries
+it.
 
 ## Residuals and the `converged` flag
 
-`final_residual` in both `conv.json` and `solved.json` is the **explicitly
+`final_residual` in `conv.json` is the **explicitly
 recomputed** relative residual `||b - A x|| / ||b||`, not Belos's
 `achievedTol()`. Likewise `converged` requires both `Belos::Converged` and that
 recomputed residual being within `kResidualSlack` of the solver tolerance.
@@ -225,8 +248,7 @@ hook requires. Since each block inverse is an inexact inner GMRES solve, the
 preconditioner is non-stationary and that estimate can cross the tolerance while
 the true residual does not. A candidate that converges falsely stops early, so
 left unchecked it would report `converged` with a low iteration count, a small
-residual and a short iterate time, winning every tiebreaker in both `best_conv`
-and `best_time`. The bias also grows with merging, since a merged group is
+residual and a short iterate time, winning the best-time pick. The bias also grows with merging, since a merged group is
 larger and less well conditioned than the singletons it replaces.
 
 ## How the watcher picks the ordering
@@ -246,8 +268,8 @@ trilinos-teko-pyfront's `SETUP.md`):
    evaluated under the same inexactness the real block solves run at. No cost
    model of the real system exists yet, so ranking is on iterations alone
    (`RandomSearch`'s `unit_cost`).
-4. `use_ordering` and `opt_ordering` are both the pick from
-   `pick_opt_ordering`: with
+4. The first row is the pick from `pick_opt_ordering`, flagged
+   `opt_ordering`, and `use_ordering` too unless `SEND_USE_ORDERING` is off: with
    `threshold = (max_iters - min_iters) * 0.2 + min_iters`, the ordering with
    the FEWEST mergers among those at or below it, ties broken on fewer
    iterations then on the ordering itself.
@@ -260,13 +282,21 @@ works, so `range(4)` is fine). A skipped step is still answered, with the same
 fully merged ordering the unavailable-pyautoteko path uses, and the watcher
 says which step it skipped and why.
 
-`EMIT_TEST_ORDERINGS` in the watcher (default **off**) sends every scored
-ordering as a `test_ordering` as well, so the C++ side builds, solves and times
-each on the full system into `s<N>_solved.json`. That is the ground truth the
-surrogate is predicting, and it costs one real solve per ordering.
+`EMIT_TEST_ORDERINGS` in the watcher (default **off**,
+`TEKO_WATCHER_EMIT_TEST_ORDERINGS`) sends every scored ordering as a row as
+well, so the C++ side builds, solves and times each on the full system, and
+conv.json puts each one's real `iters` beside its `surrogate_iters`. That is the
+ground truth the surrogate is predicting, and it costs one real solve per
+ordering. `trilinos-teko-pyfront/demo.py` turns it on.
+
+`SEND_USE_ORDERING` (default **on**, `TEKO_WATCHER_SEND_USE_ORDERING`) decides
+whether the pick carries `use_ordering`. Off, no row does, and C++ applies
+whichever requested solve converged fastest. Both knobs are read from the
+environment once, when the watcher starts, which the front end does on the
+first `pyTeko` call.
 
 If pyautoteko is not importable (missing clone, or a Python without
 numpy/scipy) the watcher prints a warning naming the reason and the path it
-looked in, and answers with the fully merged ordering `[0, 0, ..., 0]` under
-`selection_mode: "chosen"`. That still converges, so a run with a broken
+looked in, and answers with the fully merged ordering `[0, 0, ..., 0]`, flagged
+`use_ordering` whatever `SEND_USE_ORDERING` says. That still converges, so a run with a broken
 watcher finishes instead of hanging or applying a preconditioner nobody chose.
