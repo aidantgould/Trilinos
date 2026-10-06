@@ -43,7 +43,7 @@ concept each); chase references by file, not just line:
 | --- | --- | --- |
 | `TEKO_ADAPTIVE_RECONFIG` | [`Teko_KrylovSurrogate.hpp:228`](../packages/teko/src/Teko_KrylovSurrogate.hpp#L228) | unset → inert |
 | `TEKO_RECONFIG_REQUESTS_DIR` | [`Teko_KrylovSurrogate.hpp`](../packages/teko/src/Teko_KrylovSurrogate.hpp) | `$PWD/teko-reconfig-requests`, via `defaultRequestsDir()` |
-| `TEKO_FACTOR_WARMUP` | [`Teko_InverseFactory.cpp:130`](../packages/teko/src/Teko_InverseFactory.cpp#L130) | on |
+| `TEKO_FACTOR_WARMUP` | [`Teko_InverseFactory.cpp:198`](../packages/teko/src/Teko_InverseFactory.cpp#L198) | follows `TEKO_ADAPTIVE_RECONFIG` |
 | `TEKO_WATCHER_IDLE_TIMEOUT` | [`wait_for_request.py:48`](wait_for_request.py#L48) | 1000 s |
 
 ## What else the flag now controls
@@ -73,6 +73,20 @@ capped at a single iteration is exactly as slow, so it is the wrapper and not
 the inner iteration count. A run with no re-solve to be comparable with has
 nothing to buy for that. Measured in
 `pyautoteko/claudes_world/adaptive_flag_ab_experiment`.
+
+The flag also sets the default for the factorization warm-up, the one untimed
+factorization the first `Teko::buildInverse(factory, A)` in a process does so
+that cold-start cost stays out of solve 1's factor time.
+`TEKO_FACTOR_WARMUP` overrides it either way. With neither set, a stock Teko
+application does no extra work.
+
+The warm-up and the factor-time stopwatch act only on the outermost
+`buildInverse`/`rebuildInverse` call on a thread. A block preconditioner
+(Gauss-Seidel, SIMPLE, LSC) builds its diagonal-block inverses through those
+same functions, and before this was enforced the nested call re-entered the
+warm-up's `call_once` and hung on the first solve, flag or no flag (fixed
+2026-10-06, tested by `claudes_world/tests/warmup_nested/`). Nested builds
+were also timed twice.
 
 ## Activates only when ALL hold
 - **`TEKO_ADAPTIVE_RECONFIG` is set** (truthy) — the gate above; inert otherwise.

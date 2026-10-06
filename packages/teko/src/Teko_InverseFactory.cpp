@@ -132,13 +132,32 @@ void reset() { g_factorSeconds.store(0.0); }
 }  // namespace FactorTimeRegistry
 
 namespace {
+// Nesting depth of the free buildInverse/rebuildInverse functions on this
+// thread. A block preconditioner factory builds its diagonal-block inverses
+// through these same functions, so one application-level call can nest several
+// deep. Depth 0 on entry marks the outermost call, the only one that warms up
+// or records factor time.
+thread_local int t_buildDepth = 0;
+
+class BuildDepthGuard {
+ public:
+  BuildDepthGuard() { ++t_buildDepth; }
+  ~BuildDepthGuard() { --t_buildDepth; }
+  BuildDepthGuard(const BuildDepthGuard&)            = delete;
+  BuildDepthGuard& operator=(const BuildDepthGuard&) = delete;
+};
+
 // Adds its lifetime to the FactorTimeRegistry on destruction, so the
 // buildInverse/rebuildInverse wall time is recorded on both the normal and
-// the throwing path.
+// the throwing path. Records only for the outermost call: a nested build's
+// time is already inside its parent's span, and counting it again would
+// double it (or, during the warm-up, charge the warm-up to the registry).
 class FactorStopwatch {
  public:
-  FactorStopwatch() : start_(std::chrono::steady_clock::now()) {}
+  explicit FactorStopwatch(bool record)
+      : record_(record), start_(std::chrono::steady_clock::now()) {}
   ~FactorStopwatch() {
+    if (!record_) return;
     FactorTimeRegistry::add(std::chrono::duration<double>(
                                 std::chrono::steady_clock::now() - start_)
                                 .count());
@@ -147,23 +166,38 @@ class FactorStopwatch {
   FactorStopwatch& operator=(const FactorStopwatch&) = delete;
 
  private:
+  bool record_;
   std::chrono::steady_clock::time_point start_;
 };
+
+// Unset, empty, "0", "false" and "FALSE" are false, anything else is true: the
+// same rule as KrylovSurrogate::adaptiveEnabled() for TEKO_ADAPTIVE_RECONFIG.
+bool envTruthy(const char* v) {
+  const std::string s = v ? std::string(v) : "";
+  return !(s.empty() || s == "0" || s == "false" || s == "FALSE");
+}
 
 // One-time warm-up so the first *timed* factorization is not charged for
 // process-level initialization (Stratimikos/Ifpack2 first-use setup, the
 // first Kokkos kernel launch / OpenMP team spawn, allocator warmup). The very
-// first buildInverse(factory, A) call factors A once untimed before the real
-// timed factorization, so that one-time cost lands outside any measured solve
-// and the first and second adaptive solves are compared warm-vs-warm. On by
-// default; set TEKO_FACTOR_WARMUP=0 (or "false") to disable, e.g. if the extra
-// first factorization is unwanted.
+// first outermost buildInverse(factory, A) call factors A once untimed before
+// the real timed factorization, so that one-time cost lands outside any
+// measured solve and the first and second adaptive solves are compared
+// warm-vs-warm.
+//
+// TEKO_FACTOR_WARMUP turns it on or off explicitly. Left unset, it follows
+// TEKO_ADAPTIVE_RECONFIG, so an application that never enables the adaptive
+// hook pays for no extra factorization.
+//
+// Called only at depth 0. The warm-up's own factory.buildInverse(A) then runs
+// at depth 1, so the nested buildInverse calls a block preconditioner makes
+// skip this function instead of re-entering the call_once below on the same
+// thread, which would wait forever.
 void maybeWarmupFactor(const InverseFactory& factory, const LinearOp& A) {
   static const bool enabled = []() {
     const char* v = std::getenv("TEKO_FACTOR_WARMUP");
-    if (v == nullptr) return true;  // default on
-    const std::string s(v);
-    return !(s.empty() || s == "0" || s == "false" || s == "FALSE");
+    if (v != nullptr) return envTruthy(v);
+    return envTruthy(std::getenv("TEKO_ADAPTIVE_RECONFIG"));
   }();
   if (!enabled) return;
   static std::once_flag flag;
@@ -182,8 +216,10 @@ void maybeWarmupFactor(const InverseFactory& factory, const LinearOp& A) {
 //! Build an inverse operator using a factory and a linear operator
 InverseLinearOp buildInverse(const InverseFactory& factory, const LinearOp& A) {
   announceTrilinosBranchOnce("Teko::buildInverse(factory,A)");
-  maybeWarmupFactor(factory, A);
-  FactorStopwatch stopwatch;
+  const bool outermost = (t_buildDepth == 0);
+  BuildDepthGuard depth;
+  if (outermost) maybeWarmupFactor(factory, A);
+  FactorStopwatch stopwatch(outermost);
   InverseLinearOp inv;
   try {
     inv = factory.buildInverse(A);
@@ -218,7 +254,9 @@ InverseLinearOp buildInverse(const InverseFactory& factory, const LinearOp& A,
                              const LinearOp& precOp) {
   announceTrilinosBranchOnce("Teko::buildInverse(factory,A,precOp)");
   Teko_DEBUG_SCOPE("buildInverse(factory,A,precOp)", 10);
-  FactorStopwatch stopwatch;
+  const bool outermost = (t_buildDepth == 0);
+  BuildDepthGuard depth;
+  FactorStopwatch stopwatch(outermost);
   InverseLinearOp inv;
   try {
     inv = factory.buildInverse(A, precOp);
@@ -242,7 +280,9 @@ InverseLinearOp buildInverse(const InverseFactory& factory, const LinearOp& A,
  * given a new forward operator.
  */
 void rebuildInverse(const InverseFactory& factory, const LinearOp& A, InverseLinearOp& invA) {
-  FactorStopwatch stopwatch;
+  const bool outermost = (t_buildDepth == 0);
+  BuildDepthGuard depth;
+  FactorStopwatch stopwatch(outermost);
   InverseLinearOp inv;
   try {
     factory.rebuildInverse(A, invA);
@@ -277,7 +317,9 @@ void rebuildInverse(const InverseFactory& factory, const LinearOp& A, InverseLin
  */
 void rebuildInverse(const InverseFactory& factory, const LinearOp& A, const LinearOp& precOp,
                     InverseLinearOp& invA) {
-  FactorStopwatch stopwatch;
+  const bool outermost = (t_buildDepth == 0);
+  BuildDepthGuard depth;
+  FactorStopwatch stopwatch(outermost);
   InverseLinearOp inv;
   try {
     factory.rebuildInverse(A, precOp, invA);
