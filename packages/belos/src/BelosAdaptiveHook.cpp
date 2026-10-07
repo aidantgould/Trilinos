@@ -15,12 +15,18 @@ HookFn& globalHook() {
     return hook;
 }
 
+ErasedHookFn& globalErasedHook() {
+    static ErasedHookFn hook;
+    return hook;
+}
+
 // Diagnostic: announce this copy of libbelos and its slot when it loads. One
 // L1 line per copy, so two lines with different slots mean two copies.
 struct AnnounceLoad {
     AnnounceLoad() {
         std::ostringstream m;
-        m << "libbelos with adaptive hook registry loaded, slot=" << &globalHook();
+        m << "libbelos with adaptive hook registry loaded, slot=" << &globalHook()
+          << " erasedSlot=" << &globalErasedHook();
         AdaptiveDiag::print("L1", m.str());
     }
 };
@@ -29,6 +35,34 @@ static AnnounceLoad g_announceLoad;
 
 const void* slotAddress() { return &globalHook(); }
 bool        hookIsSet()   { return static_cast<bool>(globalHook()); }
+const void* erasedSlotAddress() { return &globalErasedHook(); }
+bool        erasedHookIsSet()   { return static_cast<bool>(globalErasedHook()); }
+
+void registerErasedHook(ErasedHookFn fn) {
+    globalErasedHook() = std::move(fn);
+    std::ostringstream m;
+    m << "registerErasedHook: erasedSlot=" << &globalErasedHook()
+      << " now " << (globalErasedHook() ? "SET" : "EMPTY");
+    AdaptiveDiag::print("H3", m.str());
+}
+
+HookResult invokeErased(const ErasedArgs& args)
+{
+    auto& h = globalErasedHook();
+    {
+        std::ostringstream k;
+        k << "invokeErased: erasedSlot=" << &h << " hook "
+          << (h ? "SET, calling it" : "EMPTY, returning default")
+          << " converged=" << args.metrics.converged
+          << " MV=" << AdaptiveDiag::demangle(args.mv->name())
+          << " OP=" << AdaptiveDiag::demangle(args.op->name());
+        std::ostringstream m;
+        m << k.str() << " (iters=" << args.metrics.num_iters << ")";
+        AdaptiveDiag::print("H4", m.str(), k.str());
+    }
+    if (h) return h(args);
+    return HookResult{};
+}
 
 void registerHook(HookFn fn) {
     globalHook() = std::move(fn);

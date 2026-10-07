@@ -1178,6 +1178,10 @@ ReturnType PseudoBlockGmresSolMgr<ScalarType,MV,OP,DM>::solve() {
       << " OP=" << Belos::AdaptiveDiag::typeName<OP>();
     if (!Teuchos::is_null(problem_) && !Teuchos::is_null(problem_->getOperator()))
       m << " op=" << Belos::AdaptiveDiag::describe(*problem_->getOperator());
+    if (!Teuchos::is_null(problem_))
+      m << " opType=" << Belos::AdaptiveDiag::dynType(problem_->getOperator())
+        << " rightPrecType=" << Belos::AdaptiveDiag::dynType(problem_->getRightPrec())
+        << " leftPrecType=" << Belos::AdaptiveDiag::dynType(problem_->getLeftPrec());
     Belos::AdaptiveDiag::print("P1", m.str());
   }
   // Set the current parameters if they were not set before.

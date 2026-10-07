@@ -759,7 +759,9 @@ void BelosLinearOpWithSolveFactory<Scalar>::initializeOpImpl(
            nonnull(Teuchos::rcp_dynamic_cast<const BlockedLinearOpBase<Scalar>>(fwdOp)))
       << " op=" << (nonnull(fwdOp) ? fwdOp->description() : std::string("null"))
       << " leftPrec=" << (nonnull(lp->getLeftPrec()) ? "set" : "null")
-      << " rightPrec=" << (nonnull(lp->getRightPrec()) ? "set" : "null");
+      << " rightPrec=" << (nonnull(lp->getRightPrec()) ? "set" : "null")
+      << " rightPrecType=" << Belos::AdaptiveDiag::dynType(lp->getRightPrec())
+      << " leftPrecType=" << Belos::AdaptiveDiag::dynType(lp->getLeftPrec());
     Belos::AdaptiveDiag::print("S1", m.str());
   }
 

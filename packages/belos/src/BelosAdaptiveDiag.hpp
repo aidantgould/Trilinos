@@ -23,6 +23,7 @@
 #pragma once
 
 #include <iostream>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -34,13 +35,24 @@
 
 #if defined(__GNUG__)
 #include <cxxabi.h>
-#include <cstdlib>
 #endif
 
 namespace Belos {
 namespace AdaptiveDiag {
 
+// Default lines per (ID, key); TEKO_DIAG_MAX overrides it (read once).
 constexpr int kMaxPerKey = 3;
+
+inline int maxPerKey()
+{
+    static const int n = [] {
+        const char* v = std::getenv("TEKO_DIAG_MAX");
+        if (v == nullptr || *v == '\0') return kMaxPerKey;
+        const int parsed = std::atoi(v);
+        return parsed > 0 ? parsed : kMaxPerKey;
+    }();
+    return n;
+}
 
 inline void print(const char* id, const std::string& msg, const std::string& key = "")
 {
@@ -48,10 +60,11 @@ inline void print(const char* id, const std::string& msg, const std::string& key
     static std::map<std::string, int> counts;
     std::lock_guard<std::mutex> lock(mtx);
     const int n = ++counts[std::string(id) + "|" + (key.empty() ? msg : key)];
-    if (n > kMaxPerKey + 1) return;
+    const int cap = maxPerKey();
+    if (n > cap + 1) return;
     std::ostringstream line;
     line << "[TekoDiag " << id << "] pid=" << ::getpid() << " ";
-    if (n == kMaxPerKey + 1)
+    if (n == cap + 1)
         line << "... further " << id << " lines like this suppressed: "
              << (key.empty() ? msg : key) << "\n";
     else
@@ -61,11 +74,8 @@ inline void print(const char* id, const std::string& msg, const std::string& key
     std::cerr << s << std::flush;
 }
 
-// Readable type name, for saying which template instantiation is running.
-template <class T>
-std::string typeName()
+inline std::string demangle(const char* raw)
 {
-    const char* raw = typeid(T).name();
 #if defined(__GNUG__)
     int status = 0;
     char* dem = abi::__cxa_demangle(raw, nullptr, nullptr, &status);
@@ -76,6 +86,20 @@ std::string typeName()
     }
 #endif
     return raw;
+}
+
+// Readable type name, for saying which template instantiation is running.
+template <class T>
+std::string typeName() { return demangle(typeid(T).name()); }
+
+// Dynamic type of whatever an RCP points at, or "null". This is what names a
+// preconditioner as Teko's (Teko::TpetraHelpers::InverseFactoryOperator,
+// Teko::PreconditionerLinearOp, ...) when its description() would not.
+template <class RCPType>
+std::string dynType(const RCPType& p)
+{
+    if (p.is_null()) return "null";
+    return demangle(typeid(*p).name());
 }
 
 inline const char* yesNo(bool b) { return b ? "yes" : "no"; }
