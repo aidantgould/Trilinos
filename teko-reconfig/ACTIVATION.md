@@ -38,14 +38,16 @@ concept each); chase references by file, not just line:
 | [`Teko_KrylovReconfigIO.hpp`](../packages/teko/src/Teko_KrylovReconfigIO.hpp) | the four JSON file formats + the watcher handshake |
 | [`Teko_KrylovReconfigPrec.hpp`](../packages/teko/src/Teko_KrylovReconfigPrec.hpp) | reconfigured ("as-if-original") system + preconditioner assembly |
 | [`Teko_KrylovSurrogate.hpp`](../packages/teko/src/Teko_KrylovSurrogate.hpp) | the Belos hook itself (`adaptiveLoop`) |
+| [`Teko_KrylovTpetraRoute.hpp`](../packages/teko/src/Teko_KrylovTpetraRoute.hpp) | the hook for Tpetra-typed solves (`tpetraAdaptiveLoop`), which converts to Thyra and runs `adaptiveLoop` |
+| [`Teko_KrylovSurrogateRegistration.hpp`](../packages/teko/src/Teko_KrylovSurrogateRegistration.hpp) | `ensureAdaptiveHookRegistered`, defined in `Teko_KrylovSurrogateInit.cpp` |
 
 ## Where the knobs are defined
 
 | Env var | Read in | Default |
 | --- | --- | --- |
-| `TEKO_ADAPTIVE_RECONFIG` | [`Teko_KrylovSurrogate.hpp:228`](../packages/teko/src/Teko_KrylovSurrogate.hpp#L228) | unset → inert |
+| `TEKO_ADAPTIVE_RECONFIG` | `adaptiveEnabled()`, [`Teko_KrylovReconfigPrec.hpp:77`](../packages/teko/src/Teko_KrylovReconfigPrec.hpp#L77) | unset → inert |
 | `TEKO_RECONFIG_REQUESTS_DIR` | [`Teko_KrylovSurrogate.hpp`](../packages/teko/src/Teko_KrylovSurrogate.hpp) | `$PWD/teko-reconfig-requests`, via `defaultRequestsDir()` |
-| `TEKO_FACTOR_WARMUP` | [`Teko_InverseFactory.cpp:198`](../packages/teko/src/Teko_InverseFactory.cpp#L198) | follows `TEKO_ADAPTIVE_RECONFIG` |
+| `TEKO_FACTOR_WARMUP` | [`Teko_InverseFactory.cpp:199`](../packages/teko/src/Teko_InverseFactory.cpp#L199) | follows `TEKO_ADAPTIVE_RECONFIG` |
 | `TEKO_WATCHER_IDLE_TIMEOUT` | [`wait_for_request.py`](wait_for_request.py) | 1000 s |
 | `TEKO_WATCHER_EMIT_TEST_ORDERINGS` | [`wait_for_request.py`](wait_for_request.py) | off |
 | `TEKO_WATCHER_SEND_USE_ORDERING` | [`wait_for_request.py`](wait_for_request.py) | on |
@@ -94,13 +96,25 @@ were also timed twice.
 
 ## Activates only when ALL hold
 - **`TEKO_ADAPTIVE_RECONFIG` is set** (truthy) — the gate above; inert otherwise.
-- The app **links/loads `libteko`** (its static initializer registers the
-  hook; otherwise `invoke()` is a silent no-op).
+- The app **links/loads `libteko`**, shared or static. Registration
+  (`ensureAdaptiveHookRegistered`) runs from libteko's static initializer and
+  again, idempotently, from every free `Teko::buildInverse` /
+  `rebuildInverse`. The second is what a static `libteko.a` needs: the linker
+  keeps only object files something references, and it would otherwise drop
+  the registration object, leaving `invoke()` a silent no-op.
 - Solve uses **`Belos::BlockGmresSolMgr`** with **`"Flexible Gmres": true`**.
-- Template types are exactly **`SC=double`, `MV=Thyra::MultiVectorBase<double>`,
-  `OP=Thyra::LinearOpBase<double>`** (the `if constexpr` guard in the sol mgr).
-- The operator casts to **`Thyra::BlockedLinearOpBase<double>`** (physically
-  blocked), and its blocks are **`Thyra::TpetraLinearOp`** over
+- The solve is one of two typings, each with its own call site in the sol mgr:
+  - **Thyra**: `SC=double`, `MV=Thyra::MultiVectorBase<double>`,
+    `OP=Thyra::LinearOpBase<double>`, and the operator casts to
+    **`Thyra::BlockedLinearOpBase<double>`** (physically blocked).
+  - **Tpetra**: `MV=Tpetra::MultiVector`, `OP=Tpetra::Operator`, reaching
+    Teko through a type-erased slot (`invokeErased`). Teko then looks for the
+    block structure it built itself: the operator, if it is a Teko
+    `TpetraOperatorWrapper` over a blocked Thyra operator (a
+    `BlockedTpetraOperator`, say), else the forward operator of a right, then
+    left, preconditioner that is a Teko `InverseFactoryOperator`. A converged
+    re-solve is copied back into the application's Tpetra LHS.
+- Either way the blocks are **`Thyra::TpetraLinearOp`** over
   **`Tpetra::CrsMatrix<double,int,long long,OpenMP-node>`** (the aliases in
   `Teko_KrylovReducedModel.hpp`).
 - The first solve produced Krylov data (`curDim > 0`) — true whether it

@@ -20,6 +20,7 @@
 #pragma once
 
 #include <functional>
+#include <typeinfo>
 
 #include "Teuchos_ParameterList.hpp"
 #include "Teuchos_RCP.hpp"
@@ -112,6 +113,27 @@ HookResult invoke(
     Teuchos::RCP<const Thyra::BlockedLinearOpBase<SC>>        blocked_op,
     Teuchos::RCP<const Teuchos::ParameterList>                params,
     const SolveMetrics&                                       metrics);
+
+// ── Type-erased route, for double solves that are not Thyra-typed ──────────
+// BlockGmresSolMgr instantiated with other vector/operator types (an
+// application calling Belos with Tpetra::MultiVector / Tpetra::Operator) has
+// no blocked Thyra operator to hand over, and Belos core cannot name Tpetra or
+// Teko types. So it passes its typed objects behind void pointers plus their
+// typeids, and the registered function (Teko's tpetraAdaptiveLoop) checks the
+// types, finds the block structure itself, and converts.
+struct ErasedArgs {
+    const std::type_info* mv;      // typeid(MV) of the solve
+    const std::type_info* op;      // typeid(OP)
+    const void* state;             // const GmresIterationState<double, MV>*
+    void*       problem;           // Teuchos::RCP<LinearProblem<double, MV, OP>>*
+    Teuchos::RCP<const Teuchos::ParameterList> params;
+    SolveMetrics metrics;
+};
+
+using ErasedHookFn = std::function<HookResult(const ErasedArgs&)>;
+
+void       registerErasedHook(ErasedHookFn fn);
+HookResult invokeErased(const ErasedArgs& args);
 
 } // namespace AdaptiveHook
 } // namespace Belos

@@ -70,6 +70,7 @@
 #include "Teko_PreconditionerLinearOp.hpp"
 #include "Teko_SolveInverseFactory.hpp"
 #include "Teko_PreconditionerInverseFactory.hpp"
+#include "Teko_KrylovSurrogateRegistration.hpp"
 
 #include <iostream>
 #include <set>
@@ -216,6 +217,7 @@ void maybeWarmupFactor(const InverseFactory& factory, const LinearOp& A) {
 //! Build an inverse operator using a factory and a linear operator
 InverseLinearOp buildInverse(const InverseFactory& factory, const LinearOp& A) {
   announceTrilinosBranchOnce("Teko::buildInverse(factory,A)");
+  KrylovSurrogate::ensureAdaptiveHookRegistered("Teko::buildInverse");
   const bool outermost = (t_buildDepth == 0);
   BuildDepthGuard depth;
   if (outermost) maybeWarmupFactor(factory, A);
@@ -253,6 +255,7 @@ InverseLinearOp buildInverse(const InverseFactory& factory, const LinearOp& A) {
 InverseLinearOp buildInverse(const InverseFactory& factory, const LinearOp& A,
                              const LinearOp& precOp) {
   announceTrilinosBranchOnce("Teko::buildInverse(factory,A,precOp)");
+  KrylovSurrogate::ensureAdaptiveHookRegistered("Teko::buildInverse");
   Teko_DEBUG_SCOPE("buildInverse(factory,A,precOp)", 10);
   const bool outermost = (t_buildDepth == 0);
   BuildDepthGuard depth;
@@ -280,6 +283,7 @@ InverseLinearOp buildInverse(const InverseFactory& factory, const LinearOp& A,
  * given a new forward operator.
  */
 void rebuildInverse(const InverseFactory& factory, const LinearOp& A, InverseLinearOp& invA) {
+  KrylovSurrogate::ensureAdaptiveHookRegistered("Teko::rebuildInverse");
   const bool outermost = (t_buildDepth == 0);
   BuildDepthGuard depth;
   FactorStopwatch stopwatch(outermost);
@@ -317,6 +321,7 @@ void rebuildInverse(const InverseFactory& factory, const LinearOp& A, InverseLin
  */
 void rebuildInverse(const InverseFactory& factory, const LinearOp& A, const LinearOp& precOp,
                     InverseLinearOp& invA) {
+  KrylovSurrogate::ensureAdaptiveHookRegistered("Teko::rebuildInverse");
   const bool outermost = (t_buildDepth == 0);
   BuildDepthGuard depth;
   FactorStopwatch stopwatch(outermost);

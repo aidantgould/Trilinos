@@ -1292,6 +1292,29 @@ ReturnType BlockGmresSolMgr<ScalarType,MV,OP,DM>::solve() {
           }
         }
       }
+      else if constexpr (std::is_same_v<ScalarType, double> &&
+                         std::is_same_v<DM, DefaultDenseMatrix<int,ScalarType>>) {
+        // Type-erased route (see BelosAdaptiveHook.hpp): a double solve with
+        // other vector/operator types, typically Tpetra. Same conditions as
+        // the Thyra site except the blocked-operator cast, which Teko does.
+        auto fgmres_iter =
+          Teuchos::rcp_dynamic_cast<BlockFGmresIter<ScalarType,MV,OP>>(block_gmres_iter);
+        if (isFlexible_ && isConverged && !fgmres_iter.is_null()) {
+          const double wall_time_sec = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - solveStartTime).count();
+          double achieved_tol = MT::zero();
+          const std::vector<MagnitudeType>* pTestValues = impConvTest_->getTestValue();
+          if (pTestValues != NULL && pTestValues->size() >= 1)
+            achieved_tol = *std::max_element(pTestValues->begin(), pTestValues->end());
+          const auto state = fgmres_iter->getState();
+          adaptiveHookResult = Belos::AdaptiveHook::invokeErased(
+            Belos::AdaptiveHook::ErasedArgs{
+              &typeid(MV), &typeid(OP), &state, &problem_, params_,
+              Belos::AdaptiveHook::SolveMetrics{
+                wall_time_sec, achieved_tol,
+                /*converged=*/true, fgmres_iter->getNumIters()}});
+        }
+      }
 #endif // HAVE_BELOS_THYRA
       // ────────────────────────────────────────────────────────────────────
 
@@ -1406,6 +1429,22 @@ ReturnType BlockGmresSolMgr<ScalarType,MV,OP,DM>::solve() {
           Belos::AdaptiveHook::SolveMetrics{
             wall_time_sec, achievedTol_, /*converged=*/false, numIters_});
       }
+    }
+  }
+  else if constexpr (std::is_same_v<ScalarType, double> &&
+                     std::is_same_v<DM, DefaultDenseMatrix<int,ScalarType>>) {
+    // Type-erased route on the stalled path; mirrors the converged one above.
+    auto fgmres_iter =
+      Teuchos::rcp_dynamic_cast<BlockFGmresIter<ScalarType,MV,OP>>(block_gmres_iter);
+    if (isFlexible_ && (!isConverged || loaDetected_) && !fgmres_iter.is_null()) {
+      const double wall_time_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - solveStartTime).count();
+      const auto state = fgmres_iter->getState();
+      adaptiveHookResult = Belos::AdaptiveHook::invokeErased(
+        Belos::AdaptiveHook::ErasedArgs{
+          &typeid(MV), &typeid(OP), &state, &problem_, params_,
+          Belos::AdaptiveHook::SolveMetrics{
+            wall_time_sec, achievedTol_, /*converged=*/false, numIters_}});
     }
   }
 

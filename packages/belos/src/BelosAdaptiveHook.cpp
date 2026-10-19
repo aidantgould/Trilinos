@@ -13,9 +13,23 @@ HookFn& globalHook() {
     static HookFn hook;
     return hook;
 }
+
+ErasedHookFn& globalErasedHook() {
+    static ErasedHookFn hook;
+    return hook;
+}
 } // namespace
 
 void registerHook(HookFn fn) { globalHook() = std::move(fn); }
+
+void registerErasedHook(ErasedHookFn fn) { globalErasedHook() = std::move(fn); }
+
+HookResult invokeErased(const ErasedArgs& args)
+{
+    auto& h = globalErasedHook();
+    if (h) return h(args);
+    return HookResult{};
+}
 
 HookResult invoke(
     const State&                                              state,
