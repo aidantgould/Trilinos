@@ -40,6 +40,7 @@
 #include "Thyra_ProductMultiVectorBase.hpp"
 #include "Thyra_TpetraLinearOp.hpp"
 #include "Thyra_TpetraMultiVector.hpp"
+#include "Thyra_TpetraVector.hpp"
 #include "Thyra_TpetraThyraWrappers.hpp"
 
 // ── Tpetra ────────────────────────────────────────────────────────────────
@@ -105,6 +106,33 @@ using State    = Belos::GmresIterationState<SC, MV>;
 // Section 1: distributed helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
+// The Tpetra::MultiVector under one block of a Thyra product multivector, or
+// null if the block wraps no Tpetra data. A block is a Thyra::TpetraMultiVector,
+// or a Thyra::TpetraVector when the product is a single Thyra vector
+// (Thyra::createMember, which is what a Stratimikos application solving one
+// right-hand side hands Belos as its LHS and RHS). TpetraVector does not derive
+// from TpetraMultiVector, but the Tpetra::Vector it wraps is a
+// Tpetra::MultiVector. No data is copied.
+inline Teuchos::RCP<const TpetraMV> constTpetraOfBlock(
+    const Teuchos::RCP<const Thyra::MultiVectorBase<SC>>& blk)
+{
+    auto tmv = Teuchos::rcp_dynamic_cast<const Thyra::TpetraMultiVector<SC, LO, GO, Node>>(blk);
+    if (!tmv.is_null()) return tmv->getConstTpetraMultiVector();
+    auto tv = Teuchos::rcp_dynamic_cast<const Thyra::TpetraVector<SC, LO, GO, Node>>(blk);
+    if (!tv.is_null()) return tv->getConstTpetraVector();
+    return Teuchos::null;
+}
+
+inline Teuchos::RCP<TpetraMV> tpetraOfBlock(
+    const Teuchos::RCP<Thyra::MultiVectorBase<SC>>& blk)
+{
+    auto tmv = Teuchos::rcp_dynamic_cast<Thyra::TpetraMultiVector<SC, LO, GO, Node>>(blk);
+    if (!tmv.is_null()) return tmv->getTpetraMultiVector();
+    auto tv = Teuchos::rcp_dynamic_cast<Thyra::TpetraVector<SC, LO, GO, Node>>(blk);
+    if (!tv.is_null()) return tv->getTpetraVector();
+    return Teuchos::null;
+}
+
 // Return block j of a Thyra ProductMultiVector as its underlying (possibly
 // distributed) Tpetra::MultiVector. No data is copied or gathered.
 inline Teuchos::RCP<const TpetraMV> getBlockTpetraMV(
@@ -115,13 +143,12 @@ inline Teuchos::RCP<const TpetraMV> getBlockTpetraMV(
     TEUCHOS_TEST_FOR_EXCEPTION(pmv.is_null(), std::runtime_error,
         "Teko::KrylovSurrogate::getBlockTpetraMV: mv is not a ProductMultiVectorBase");
 
-    auto blk  = pmv->getMultiVectorBlock(j);
-    auto tmv  = Teuchos::rcp_dynamic_cast<const Thyra::TpetraMultiVector<SC, LO, GO, Node>>(blk);
+    auto tmv  = constTpetraOfBlock(pmv->getMultiVectorBlock(j));
     TEUCHOS_TEST_FOR_EXCEPTION(tmv.is_null(), std::runtime_error,
         "Teko::KrylovSurrogate::getBlockTpetraMV: block " + std::to_string(j) +
-        " is not a TpetraMultiVector");
+        " is neither a TpetraMultiVector nor a TpetraVector");
 
-    return tmv->getConstTpetraMultiVector();
+    return tmv;
 }
 
 // Block (i,j) of A_blocked as a Tpetra CrsMatrix, or null when the block is

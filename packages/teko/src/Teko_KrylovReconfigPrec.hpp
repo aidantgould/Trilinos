@@ -261,19 +261,20 @@ inline void copyOriginalToGrouped(
     Teuchos::RCP<MV>                     grouped,
     const std::vector<std::vector<int>>& groups)
 {
-    using TMV = Thyra::TpetraMultiVector<SC, LO, GO, Node>;
+    // A block of either side may be a TpetraVector, not a TpetraMultiVector
+    // (see constTpetraOfBlock), so the blocks are unwrapped through it.
     auto o  = Teuchos::rcp_dynamic_cast<const Thyra::ProductMultiVectorBase<SC>>(orig, true);
     auto gp = Teuchos::rcp_dynamic_cast<Thyra::ProductMultiVectorBase<SC>>(grouped, true);
     for (size_t g = 0; g < groups.size(); ++g) {
-        auto gT = Teuchos::rcp_dynamic_cast<TMV>(
-                      gp->getNonconstMultiVectorBlock(static_cast<int>(g)), true)
-                      ->getTpetraMultiVector();
+        auto gT = tpetraOfBlock(gp->getNonconstMultiVectorBlock(static_cast<int>(g)));
+        TEUCHOS_TEST_FOR_EXCEPTION(gT.is_null(), std::runtime_error,
+            "copyOriginalToGrouped: grouped block is not Tpetra-backed");
         auto gview = gT->getVectorNonConst(0)->getDataNonConst();
         size_t off = 0;
         for (int k : groups[g]) {
-            auto mT = Teuchos::rcp_dynamic_cast<const TMV>(
-                          o->getMultiVectorBlock(k), true)
-                          ->getConstTpetraMultiVector();
+            auto mT = constTpetraOfBlock(o->getMultiVectorBlock(k));
+            TEUCHOS_TEST_FOR_EXCEPTION(mT.is_null(), std::runtime_error,
+                "copyOriginalToGrouped: original block is not Tpetra-backed");
             auto mview = mT->getVector(0)->getData();
             const size_t nloc = mT->getLocalLength();
             for (size_t r = 0; r < nloc; ++r) gview[off + r] = mview[r];
@@ -289,19 +290,18 @@ inline void copyGroupedToOriginal(
     Teuchos::RCP<MV>                     orig,
     const std::vector<std::vector<int>>& groups)
 {
-    using TMV = Thyra::TpetraMultiVector<SC, LO, GO, Node>;
     auto gp = Teuchos::rcp_dynamic_cast<const Thyra::ProductMultiVectorBase<SC>>(grouped, true);
     auto o  = Teuchos::rcp_dynamic_cast<Thyra::ProductMultiVectorBase<SC>>(orig, true);
     for (size_t g = 0; g < groups.size(); ++g) {
-        auto gT = Teuchos::rcp_dynamic_cast<const TMV>(
-                      gp->getMultiVectorBlock(static_cast<int>(g)), true)
-                      ->getConstTpetraMultiVector();
+        auto gT = constTpetraOfBlock(gp->getMultiVectorBlock(static_cast<int>(g)));
+        TEUCHOS_TEST_FOR_EXCEPTION(gT.is_null(), std::runtime_error,
+            "copyGroupedToOriginal: grouped block is not Tpetra-backed");
         auto gview = gT->getVector(0)->getData();
         size_t off = 0;
         for (int k : groups[g]) {
-            auto mT = Teuchos::rcp_dynamic_cast<TMV>(
-                          o->getNonconstMultiVectorBlock(k), true)
-                          ->getTpetraMultiVector();
+            auto mT = tpetraOfBlock(o->getNonconstMultiVectorBlock(k));
+            TEUCHOS_TEST_FOR_EXCEPTION(mT.is_null(), std::runtime_error,
+                "copyGroupedToOriginal: original block is not Tpetra-backed");
             auto mview = mT->getVectorNonConst(0)->getDataNonConst();
             const size_t nloc = mT->getLocalLength();
             for (size_t r = 0; r < nloc; ++r) mview[r] = gview[off + r];
