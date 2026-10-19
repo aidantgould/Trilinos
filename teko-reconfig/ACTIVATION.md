@@ -45,7 +45,8 @@ concept each); chase references by file, not just line:
 
 | Env var | Read in | Default |
 | --- | --- | --- |
-| `TEKO_ADAPTIVE_RECONFIG` | `adaptiveEnabled()`, [`Teko_KrylovReconfigPrec.hpp:77`](../packages/teko/src/Teko_KrylovReconfigPrec.hpp#L77) | unset → inert |
+| `TEKO_ADAPTIVE_RECONFIG` | `adaptiveEnabled()`, [`Teko_KrylovReconfigPrec.hpp:84`](../packages/teko/src/Teko_KrylovReconfigPrec.hpp#L84) | unset → inert |
+| `TEKO_RECONFIG_DRY_RUN` | `dryRunEnabled()`, [`Teko_KrylovReconfigPrec.hpp:92`](../packages/teko/src/Teko_KrylovReconfigPrec.hpp#L92) | off |
 | `TEKO_RECONFIG_REQUESTS_DIR` | [`Teko_KrylovSurrogate.hpp`](../packages/teko/src/Teko_KrylovSurrogate.hpp) | `$PWD/teko-reconfig-requests`, via `defaultRequestsDir()` |
 | `TEKO_FACTOR_WARMUP` | [`Teko_InverseFactory.cpp:199`](../packages/teko/src/Teko_InverseFactory.cpp#L199) | follows `TEKO_ADAPTIVE_RECONFIG` |
 | `TEKO_WATCHER_IDLE_TIMEOUT` | [`wait_for_request.py`](wait_for_request.py) | 1000 s |
@@ -202,6 +203,28 @@ What C++ does with the rows:
 - No rows (or no answer before the timeout): no re-solve, and conv.json holds
   the initial row only.
 
+### Dry run: `TEKO_RECONFIG_DRY_RUN`
+For collecting what the reconfiguration would do without letting it change any
+result. Set alongside the gate, it leaves everything above as it is (surrogate,
+watcher, tests, selection, final solve, conv.json) except that the final solve
+is never applied. Its solution is not written into the application's LHS, and
+the hook reports it to Belos as failed, so the application gets solve 1
+exactly as it would have with the gate off: its solution, its status (a stalled
+solve 1 stays stalled), its iteration count and its tolerance. The final row in
+conv.json keeps its real `converged`, `iters` and residual, since that is the
+would-be behaviour being collected, and conv.json's `applied` is `false`. The
+hook announces it on both streams after the gate line:
+
+```
+[TekoAdaptive] dry run: TEKO_RECONFIG_DRY_RUN set -> the final solve runs and is recorded, never applied
+```
+
+The cost is the same as a live run, so in `best_time` mode the final still
+re-solves a test that already ran. The flag is read by C++, not the watcher,
+so it holds whatever the watcher sends, including the fallback ordering that
+always carries `use_ordering`. A sample run command is at the top of
+`wait_for_request.py`.
+
 ### `s<N>_conv.json` — C++ output (every solve that ran)
 One row per solve in execution order: the initial (the application's own
 solve), the tests in reconfig order, the final. Every reconfig row comes back
@@ -210,6 +233,7 @@ the reconfig did, plus what actually happened.
 ```json
 {
   "request_id": 3,
+  "applied": true,
   "solves": [
     {
       "ordering": [0, 1, 2],
@@ -230,6 +254,10 @@ the reconfig did, plus what actually happened.
   ]
 }
 ```
+- `applied` says whether the application received the final solve's
+  solution: `true` exactly when the final converged and this was not a dry
+  run. `false` when there was no final (no rows, no answer), when it did not
+  converge, and on every dry run.
 - `type` is `"initial"`, `"test"`, or `"final from selection mode <mode>"`,
   with `<mode>` either `use_ordering` or `best_time`.
 - The initial row's ordering is the application's own blocking,

@@ -1,5 +1,26 @@
 """
-wait_for_request.py — continuously watches for reconfiguration requests
+Sample run: a dry run of a whole application run that also sends every scored
+ordering as a test, so conv.json gets each one's real iterations beside its
+surrogate prediction, while the application keeps solve 1's results
+throughout. From this directory, with your application in place of ./my_app:
+
+    export TEKO_RECONFIG_REQUESTS_DIR=$PWD/requests
+    TEKO_WATCHER_EMIT_TEST_ORDERINGS=1 \
+        ../../trilinos-teko-pyfront/mypy/bin/python3 wait_for_request.py &
+    TEKO_ADAPTIVE_RECONFIG=1 TEKO_RECONFIG_DRY_RUN=1 ./my_app
+    kill %1
+
+The watcher's flags go to the watcher's environment and the hook's (the gate,
+the dry run) to the application's. The requests dir goes to both, which is why
+it is exported. Use the venv Python, since the search needs pyautoteko's
+numpy/scipy. Every step is searched (SEARCH_ON_STEPS is None) and the
+watcher answers each in turn until it is killed or idles past
+TEKO_WATCHER_IDLE_TIMEOUT. Through pyTeko, do not start a watcher yourself: set
+the same variables before the first pyTeko call, which spawns its own. Start
+from an empty requests dir: run this way, nothing wipes it, so an earlier run's
+s<N> files would sit beside this one's.
+
+wait_for_request.py: continuously watches for reconfiguration requests
 (s<N>_request.json, written by Teko::KrylovSurrogate::writeRequestJson) and
 answers each one by writing s<N>_reconfig.json (read by
 Teko::KrylovSurrogate::waitForOrdering).
@@ -17,8 +38,9 @@ FGMRES. No orderings are enumerated or sampled here. Without pyautoteko the
 watcher still answers, with the fully merged ordering and a warning (see
 choose_solves). SEARCH_ON_STEPS restricts which steps are searched at all.
 
-Runs until Ctrl-C or until RUN_SECONDS (default 300 = 5 minutes) have
-elapsed, whichever comes first.
+Runs until Ctrl-C, until the process that launched it exits, or until no
+request has been handled for IDLE_TIMEOUT_SEC (TEKO_WATCHER_IDLE_TIMEOUT,
+default 1000 s), whichever comes first.
 
 Normally you don't run this by hand — the front-end interface spawns it
 automatically. To run it standalone (from its own directory):

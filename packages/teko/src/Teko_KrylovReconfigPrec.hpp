@@ -63,8 +63,17 @@
 namespace Teko {
 namespace KrylovSurrogate {
 
-// Is the adaptive-reconfiguration hook live? Reads TEKO_ADAPTIVE_RECONFIG;
-// unset, empty, "0", "false" and "FALSE" all mean off.
+// Whether a boolean environment variable is on: unset, empty, "0", "false" and
+// "FALSE" all mean off, anything else on. The one rule every TEKO_* switch
+// here uses, and the one the watcher's env_flag mirrors.
+inline bool envFlagOn(const char* name)
+{
+    const char* en = std::getenv(name);
+    const std::string v = en ? std::string(en) : "";
+    return !(v.empty() || v == "0" || v == "false" || v == "FALSE");
+}
+
+// Is the adaptive-reconfiguration hook live? Reads TEKO_ADAPTIVE_RECONFIG.
 //
 // The single definition of "the hook is on", because two places need it and
 // they must not drift: adaptiveLoop's opt-in gate, and any caller deciding
@@ -72,12 +81,15 @@ namespace KrylovSurrogate {
 // front end's choice of per-block inverse, teko_ext.cpp). A caller that
 // disagreed with the gate would either pay the hook's costs without the hook
 // running, or set up a first solve the re-solve cannot be compared with.
-inline bool adaptiveEnabled()
-{
-    const char* en = std::getenv("TEKO_ADAPTIVE_RECONFIG");
-    const std::string v = en ? std::string(en) : "";
-    return !(v.empty() || v == "0" || v == "false" || v == "FALSE");
-}
+inline bool adaptiveEnabled() { return envFlagOn("TEKO_ADAPTIVE_RECONFIG"); }
+
+// Dry run: TEKO_RECONFIG_DRY_RUN. The hook does everything it otherwise does
+// (surrogate, watcher, tests, selection, final solve, conv.json), but the
+// final solve is never applied: the application keeps solve 1's solution and
+// Belos reports solve 1's status, iteration count and tolerance, as if the
+// final solve had failed. For collecting what the reconfiguration would have
+// done without letting it change any result. Only meaningful with the gate on.
+inline bool dryRunEnabled() { return envFlagOn("TEKO_RECONFIG_DRY_RUN"); }
 
 // ||b - A x|| / ||b||, computed explicitly (one extra apply). Returns the
 // absolute norm when ||b|| is zero.

@@ -76,7 +76,7 @@ def check_pair(n, reconfig, conv, send_use_ordering):
     requested = reconfig["solves"]
     rows = conv["solves"]
     assert conv["request_id"] == reconfig["request_id"] == n
-    assert list(conv) == ["request_id", "solves"]
+    assert list(conv) == ["request_id", "applied", "solves"]
     for row in rows:
         assert list(row) == CONV_FIELDS, f"s{n}: field order {list(row)}"
 
@@ -90,6 +90,8 @@ def check_pair(n, reconfig, conv, send_use_ordering):
     else:
         assert initial["surrogate_iters"] is None and initial["surrogate_flags"] == []
     assert all(t["type"] == "test" for t in tests)
+    # not a dry run, so the application got the final exactly when it converged
+    assert conv["applied"] == final["converged"]
 
     use = [r for r in requested if "use_ordering" in r["surrogate_flags"]]
     assert bool(use) == send_use_ordering or len(requested) == 1

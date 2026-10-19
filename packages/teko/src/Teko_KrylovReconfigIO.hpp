@@ -540,10 +540,13 @@ inline void writeDoubleJson(std::ostream& os, double v)
 
 // Write s<request_id>_conv.json (atomically, via a .tmp file + rename): every
 // solve this request ran, in execution order (the initial solve, the tests,
-// the final).
+// the final). applied says whether the application received the final solve's
+// solution; false when there was no final, when it did not converge, and on
+// every dry run (dryRunEnabled), whatever the final row's converged says.
 inline void writeConvergenceJson(
     const std::string&              convergence_dir,
     int                              request_id,
+    bool                             applied,
     const std::vector<SolveRecord>& solves)
 {
     fs::create_directories(convergence_dir);
@@ -557,6 +560,7 @@ inline void writeConvergenceJson(
 
     ofs << "{\n";
     ofs << "  \"request_id\": " << request_id << ",\n";
+    ofs << "  \"applied\": " << (applied ? "true" : "false") << ",\n";
     ofs << "  \"solves\": [\n";
     for (std::size_t i = 0; i < solves.size(); ++i) {
         const SolveRecord& s = solves[i];

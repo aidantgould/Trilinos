@@ -1,6 +1,7 @@
 """Tests for the hook's reach from an external app: registration under a static
-link, and the Thyra and Tpetra-typed routes into it. Run with pytest, or
-directly:
+link, the Thyra and Tpetra-typed routes into it, and on both routes that a dry
+run (TEKO_RECONFIG_DRY_RUN) leaves the application with solve 1. Run with
+pytest, or directly:
 
     python test_tpetra_route.py
 
@@ -149,6 +150,32 @@ def test_stalled_solve_is_rescued_into_the_applications_x():
         assert solver_converged(out), f"{route}:\n{out}{err}"
         assert same_residual(true_residual(out), final["final_residual"]), route
         assert true_residual(out) < 1e-6
+        assert conv["applied"] is True
+
+
+def test_dry_run_keeps_the_stalled_solve_1():
+    # The same stall with TEKO_RECONFIG_DRY_RUN: the final solve still runs and
+    # converges in conv.json, but the application holds solve 1's x and Belos
+    # reports solve 1's stall.
+    for route in ROUTES:
+        out, err, conv = run_with_watcher([route, STALL_ITERS], {"TEKO_RECONFIG_DRY_RUN": "1"})
+        initial, final = conv["solves"][0], conv["solves"][-1]
+        assert "dry run: TEKO_RECONFIG_DRY_RUN set" in out and "not applied" in out, route
+        assert not initial["converged"] and final["converged"], route
+        assert conv["applied"] is False
+        assert not solver_converged(out), f"{route}:\n{out}{err}"
+        assert same_residual(true_residual(out), initial["final_residual"]), route
+        assert not same_residual(true_residual(out), final["final_residual"]), route
+
+
+def test_dry_run_keeps_a_converged_solve_1():
+    for route in ROUTES:
+        out, err, conv = run_with_watcher([route], {"TEKO_RECONFIG_DRY_RUN": "1"})
+        initial, final = conv["solves"][0], conv["solves"][-1]
+        assert initial["converged"] and final["converged"], route
+        assert conv["applied"] is False
+        assert solver_converged(out), f"{route}:\n{out}{err}"
+        assert same_residual(true_residual(out), initial["final_residual"]), route
 
 
 if __name__ == "__main__":

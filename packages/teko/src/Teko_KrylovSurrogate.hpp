@@ -284,6 +284,10 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
                      + " -> hook " + (enabled ? "ACTIVE" : "inert") + "\n");
         if (!enabled) return {};
     }
+    const bool dry_run = dryRunEnabled();
+    if (dry_run)
+        announceBoth("[TekoAdaptive] dry run: TEKO_RECONFIG_DRY_RUN set -> the final "
+                     "solve runs and is recorded, never applied\n");
 
     // requests_dir comes from TEKO_RECONFIG_REQUESTS_DIR if set, otherwise
     // defaultRequestsDir(). Announced either way, on rank 0 below, because a
@@ -458,7 +462,7 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
                       << (resp.received ? "reconfig requested no solves"
                                         : "no reconfig received")
                       << "; returning first solve result.\n";
-            writeConvergenceJson(convergence_dir, request_id, records);
+            writeConvergenceJson(convergence_dir, request_id, /*applied=*/false, records);
         }
         return {};
     }
@@ -542,25 +546,35 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
     // ── Phase 4: the final solve ───────────────────────────────────────────
     // Solve the selected ordering (a best-time pick is re-solved, since no
     // test keeps its solution) and write its result into the LHS the
-    // application reads back.
+    // application reads back. On a dry run it is solved and recorded the same
+    // way but never written: the LHS keeps solve 1's result.
     SolveRecord finalRes = solveOrdering(resp.solves[selected_row].ordering, A_blocked,
                                          nb, method, invFact, problem, orig_params,
-                                         comm, b_norm, /*writeToLHS=*/true);
+                                         comm, b_norm, /*writeToLHS=*/!dry_run);
     finalRes.type = "final from selection mode " + selection_mode;
     copySurrogateFields(resp.solves[selected_row], finalRes);
+    const bool applied = finalRes.converged && !dry_run;
 
     if (rank == 0) {
         records.insert(records.end(), tests.begin(), tests.end());
         records.push_back(finalRes);
-        writeConvergenceJson(convergence_dir, request_id, records);
+        writeConvergenceJson(convergence_dir, request_id, applied, records);
 
         if (!finalRes.converged)
             std::cerr << "[TekoAdaptive] final solve did not converge ("
                       << finalRes.iters << " iters). Using first result.\n";
+        else if (dry_run)
+            std::cout << "[TekoAdaptive] final solve (" << selection_mode
+                      << ") converged (" << finalRes.iters << " iters), not applied "
+                      << "(TEKO_RECONFIG_DRY_RUN). Using first result.\n";
         else
             std::cout << "[TekoAdaptive] final solve (" << selection_mode
                       << ") converged (" << finalRes.iters << " iters).\n";
     }
+
+    // A dry run reports the final solve as failed, so the manager keeps its
+    // own (first-solve) result and the Tpetra route skips its copy-back.
+    if (dry_run) return {};
 
     // Report the final solve back to the manager. Only when it converged (and
     // so wrote its result into the LHS) does this override the manager's
