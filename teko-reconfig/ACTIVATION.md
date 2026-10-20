@@ -52,6 +52,7 @@ concept each); chase references by file, not just line:
 | `TEKO_WATCHER_IDLE_TIMEOUT` | [`wait_for_request.py`](wait_for_request.py) | 1000 s |
 | `TEKO_WATCHER_EMIT_TEST_ORDERINGS` | [`wait_for_request.py`](wait_for_request.py) | off |
 | `TEKO_WATCHER_SEND_USE_ORDERING` | [`wait_for_request.py`](wait_for_request.py) | on |
+| `TEKO_WATCHER_MAX_SEARCH_COUNT` | [`wait_for_request.py`](wait_for_request.py) | 600, `surrogate_search.MAX_SEARCH_COUNT` |
 
 ## What else the flag now controls
 
@@ -304,7 +305,14 @@ trilinos-teko-pyfront's `SETUP.md`):
    by `ranks` at the `equation_ends` boundaries.
 2. pyautoteko's `RandomSearch` enumerates the orderings (every one of them when
    there are few enough: 541 at 5 blocks, about 1.4 s) or samples up to
-   `MAX_SEARCH_COUNT` of them when there are not.
+   `MAX_SEARCH_COUNT` of them when there are not. The watcher passes its own
+   `MAX_SEARCH_COUNT` (`TEKO_WATCHER_MAX_SEARCH_COUNT`, default 600, read once
+   at startup and named in the watcher's startup line). Below the number of
+   orderings the search is no longer exhaustive: it walks that many shuffled
+   candidates, the fully merged and unmerged ones always first, and can miss
+   the best. With `EMIT_TEST_ORDERINGS` on it also caps the real test solves
+   per request. A value that is not a positive integer stops the watcher at
+   startup, before it answers anything.
 3. Each is scored by an FGMRES solve on the surrogate alone, at
    `SURROGATE_JITTER = 1e-4`, matching `kBlockSolveTol` so the surrogate is
    evaluated under the same inexactness the real block solves run at. No cost

@@ -248,6 +248,59 @@ def test_env_flag():
         os.environ.pop(name, None)
 
 
+def test_env_count():
+    import os
+    name = "TEKO_WATCHER_TEST_ENV_COUNT"
+    try:
+        os.environ.pop(name, None)
+        assert watcher.env_count(name, 600) == 600
+        os.environ[name] = ""
+        assert watcher.env_count(name, 600) == 600
+        os.environ[name] = " 40 "
+        assert watcher.env_count(name, 600) == 40
+        for bad in ("abc", "0", "-5", "2.5"):
+            os.environ[name] = bad
+            try:
+                watcher.env_count(name, 600)
+            except ValueError as exc:
+                assert name in str(exc) and bad in str(exc)
+            else:
+                raise AssertionError(f"{bad!r} was accepted")
+    finally:
+        os.environ.pop(name, None)
+
+
+def test_choose_solves_passes_the_search_count():
+    # the watcher's MAX_SEARCH_COUNT reaches search(), and below the total the
+    # search walks that many candidates, shuffled rather than exhaustive. They
+    # can be fewer distinct orderings: RandomSearch puts the two extremes first
+    # without removing them from the shuffled list, so one may come up twice
+    seen = {}
+    real_search = surrogate_search.search
+
+    def recording_search(request, **kwargs):
+        seen.update(kwargs)
+        return real_search(request, **kwargs)
+
+    was = watcher.MAX_SEARCH_COUNT
+    watcher.MAX_SEARCH_COUNT = 5
+    surrogate_search.search = recording_search
+    restore = knobs(emit=True)
+    try:
+        rows = watcher.choose_solves(fake_request())
+    finally:
+        restore()
+        surrogate_search.search = real_search
+        watcher.MAX_SEARCH_COUNT = was
+    assert seen["max_search_count"] == 5
+    result = surrogate_search.search(fake_request(), max_search_count=5)
+    assert result.mode == "shuffled" and result.total == 13
+    assert result.n_evaluated <= 5
+    # every distinct scored ordering emitted once, the pick among them
+    assert sorted(r["ordering"] for r in rows) == sorted(result.orderings())
+    assert {(0, 0, 0), (0, 1, 2)} <= {tuple(o) for o in result.orderings()}
+
+
 def test_search_on_step_gate():
     real = watcher.SEARCH_ON_STEPS
     try:

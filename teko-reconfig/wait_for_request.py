@@ -10,6 +10,9 @@ throughout. From this directory, with your application in place of ./my_app:
     TEKO_ADAPTIVE_RECONFIG=1 TEKO_RECONFIG_DRY_RUN=1 ./my_app
     kill %1
 
+TEKO_WATCHER_MAX_SEARCH_COUNT=<n> beside the other watcher flag caps how many
+orderings are scored, and so tested, per request (default 600).
+
 The watcher's flags go to the watcher's environment and the hook's (the gate,
 the dry run) to the application's. The requests dir goes to both, which is why
 it is exported. Use the venv Python, since the search needs pyautoteko's
@@ -89,6 +92,23 @@ def env_flag(name, default):
     return v not in ("", "0", "false", "FALSE")
 
 
+def env_count(name, default):
+    """A positive int from the environment, read once at startup. Unset or
+    empty gives default. Anything else that is not a positive integer raises:
+    read at import, that stops the watcher before it answers anything, rather
+    than letting it run with a count nobody chose."""
+    v = os.environ.get(name, "").strip()
+    if not v:
+        return default
+    try:
+        n = int(v)
+    except ValueError:
+        n = 0
+    if n <= 0:
+        raise ValueError(f"{name}={v!r} is not a positive integer")
+    return n
+
+
 # The flags a row of s<N>_reconfig.json can carry. A row may carry several.
 #   use_ordering      the C++ side applies this ordering as the final solve.
 #                     Without it on any row, C++ tests every row and applies
@@ -114,6 +134,16 @@ EMIT_TEST_ORDERINGS = env_flag("TEKO_WATCHER_EMIT_TEST_ORDERINGS", False)
 # there is nothing to compare it against. Overridden by
 # TEKO_WATCHER_SEND_USE_ORDERING.
 SEND_USE_ORDERING = env_flag("TEKO_WATCHER_SEND_USE_ORDERING", True)
+
+# Orderings the surrogate search scores per request: RandomSearch's cap, which
+# with the block count also picks its mode. At or above the number of
+# orderings (541 at 5 blocks) every one is scored; below it a shuffled subset
+# of that size is, and the search can miss the best. With EMIT_TEST_ORDERINGS
+# on it is also the number of real test solves per request. The default is
+# surrogate_search's, so it is written in one place. Overridden by
+# TEKO_WATCHER_MAX_SEARCH_COUNT.
+MAX_SEARCH_COUNT = env_count("TEKO_WATCHER_MAX_SEARCH_COUNT",
+                             surrogate_search.MAX_SEARCH_COUNT)
 
 # Which steps the surrogate search runs on. A "step" is the request number N in
 # s<N>_request.json: one adaptive solve, numbered from 0 within a run (the
@@ -241,7 +271,7 @@ def choose_solves(request, request_id=0):
         return fallback
 
     try:
-        result = surrogate_search.search(request)
+        result = surrogate_search.search(request, max_search_count=MAX_SEARCH_COUNT)
     except Exception as exc:
         print(f"WARNING: the surrogate search failed "
               f"({type(exc).__name__}: {exc}).\n"
@@ -296,7 +326,8 @@ def main():
     idle_desc = (f"idle timeout {IDLE_TIMEOUT_SEC:g}s"
                  if IDLE_TIMEOUT_SEC > 0 else "no idle timeout")
     print(f"Watching {REQUESTS_DIR} for s<N>_request.json "
-          f"(until Ctrl-C, parent exit, or {idle_desc})...")
+          f"(search count {MAX_SEARCH_COUNT}; until Ctrl-C, parent exit, or "
+          f"{idle_desc})...")
 
     answered = set()
     start = time.monotonic()
