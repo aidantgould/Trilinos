@@ -75,3 +75,13 @@ scored, and that every distinct scored ordering is emitted once. The
 duplicate itself is left alone, per the non-goals; it costs one surrogate
 solve, and with `EMIT_TEST_ORDERINGS` on no extra real solve, since rows are
 merged by ordering.
+
+**Fixed 2026-10-20 in pyautoteko.** `RandomSearch.search` now moves the
+extremes to the front instead of adding them, so a cap of k walks k distinct
+orderings. The same duplication had also cut exhaustive mode at
+`max_search_count == total`: 539 of 541 orderings at 5 blocks (73 of 75 at 4),
+which a `TEKO_WATCHER_MAX_SEARCH_COUNT` of 541 or 542 would have hit. The test
+here asserts `n_evaluated == 5` again.
+
+The sample run at the top of the watcher sets `TEKO_WATCHER_MAX_SEARCH_COUNT=40`
+(added at the user's request) and says what a cap below the total gives up.

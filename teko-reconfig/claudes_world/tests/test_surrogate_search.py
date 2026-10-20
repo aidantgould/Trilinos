@@ -272,9 +272,8 @@ def test_env_count():
 
 def test_choose_solves_passes_the_search_count():
     # the watcher's MAX_SEARCH_COUNT reaches search(), and below the total the
-    # search walks that many candidates, shuffled rather than exhaustive. They
-    # can be fewer distinct orderings: RandomSearch puts the two extremes first
-    # without removing them from the shuffled list, so one may come up twice
+    # search scores exactly that many distinct orderings, shuffled rather than
+    # exhaustive, the two extremes among them
     seen = {}
     real_search = surrogate_search.search
 
@@ -295,7 +294,7 @@ def test_choose_solves_passes_the_search_count():
     assert seen["max_search_count"] == 5
     result = surrogate_search.search(fake_request(), max_search_count=5)
     assert result.mode == "shuffled" and result.total == 13
-    assert result.n_evaluated <= 5
+    assert result.n_evaluated == 5
     # every distinct scored ordering emitted once, the pick among them
     assert sorted(r["ordering"] for r in rows) == sorted(result.orderings())
     assert {(0, 0, 0), (0, 1, 2)} <= {tuple(o) for o in result.orderings()}

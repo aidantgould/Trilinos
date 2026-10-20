@@ -2,16 +2,21 @@
 Sample run: a dry run of a whole application run that also sends every scored
 ordering as a test, so conv.json gets each one's real iterations beside its
 surrogate prediction, while the application keeps solve 1's results
-throughout. From this directory, with your application in place of ./my_app:
+throughout. The search is capped at 40 orderings per request, so each request
+costs at most 40 real test solves. From this directory, with your application
+in place of ./my_app:
 
     export TEKO_RECONFIG_REQUESTS_DIR=$PWD/requests
-    TEKO_WATCHER_EMIT_TEST_ORDERINGS=1 \
+    TEKO_WATCHER_EMIT_TEST_ORDERINGS=1 TEKO_WATCHER_MAX_SEARCH_COUNT=40 \
         ../../trilinos-teko-pyfront/mypy/bin/python3 wait_for_request.py &
     TEKO_ADAPTIVE_RECONFIG=1 TEKO_RECONFIG_DRY_RUN=1 ./my_app
     kill %1
 
-TEKO_WATCHER_MAX_SEARCH_COUNT=<n> beside the other watcher flag caps how many
-orderings are scored, and so tested, per request (default 600).
+TEKO_WATCHER_MAX_SEARCH_COUNT caps how many orderings are scored, and so
+tested, per request (default 600). Below the number of orderings (541 at 5
+blocks) the search is a shuffled subset, the fully merged and unmerged
+orderings always among it, so it can miss the best; drop the variable to score
+every ordering up to 5 blocks.
 
 The watcher's flags go to the watcher's environment and the hook's (the gate,
 the dry run) to the application's. The requests dir goes to both, which is why
