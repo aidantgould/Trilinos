@@ -20,6 +20,7 @@
 #include "Teko_ImplicitLinearOp.hpp"
 
 namespace Teko {
+namespace KrylovSurrogate {
 
 /** \brief Applies a preconditioner \f$M_0^{-1}\f$ unchanged, keeping a copy of
  *         each output \f$z = M_0^{-1} v\f$ and of the first input.
@@ -31,9 +32,9 @@ namespace Teko {
  * direction of the initial residual, which becomes the surrogate's right-hand
  * side.
  */
-class KrylovSurrogateRecorderOp : public ImplicitLinearOp {
+class RecorderOp : public ImplicitLinearOp {
  public:
-  KrylovSurrogateRecorderOp(const ModifiableLinearOp& prec, int maxSamples);
+  RecorderOp(const ModifiableLinearOp& prec, int maxSamples);
 
   //! @name Inherited methods from Thyra::LinearOpBase
   //@{
@@ -74,6 +75,7 @@ class KrylovSurrogateRecorderOp : public ImplicitLinearOp {
   mutable int count_;
 };
 
+}  // namespace KrylovSurrogate
 }  // end namespace Teko
 
 #endif

@@ -79,7 +79,7 @@ Teuchos::RCP<const Tpetra::Operator<ST, LO, GO, NT> > tpetraBlock(const BlockedL
  * \param[out] report the report whose surrogate fields are filled
  */
 void buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z, const MultiVector& v1,
-                          double truncationTol, KrylovSurrogateReport& report);
+                          double truncationTol, Report& report);
 
 }  // namespace KrylovSurrogate
 }  // end namespace Teko

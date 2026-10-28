@@ -19,6 +19,8 @@
 #include "BelosThyraAdapter.hpp"
 
 #include "Stratimikos_DefaultLinearSolverBuilder.hpp"
+#include "Teuchos_TimeMonitor.hpp"
+#include "Teuchos_VerboseObject.hpp"
 #include "Thyra_LinearOpWithSolveFactoryHelpers.hpp"
 #include "Thyra_MultiVectorStdOps.hpp"
 
@@ -38,7 +40,7 @@ const std::vector<int> kSizes = {60, 48, 8};
 
 // Block Gauss-Seidel with exact (Amesos2) diagonal solves, and the surrogate
 // wrapped around it
-ParameterList inverseLibraryList(const RCP<Teko::KrylovSurrogateHandle>& handle) {
+ParameterList inverseLibraryList(const RCP<Teko::KrylovSurrogate::Handle>& handle) {
   ParameterList ifl;
   ifl.sublist("BGS").set("Type", "Block Gauss-Seidel");
   ifl.sublist("BGS").set("Inverse Type", "Amesos2");
@@ -84,7 +86,7 @@ Teko::MultiVector rhs(const Teko::BlockedLinearOp& A) {
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, report_from_a_solve) {
   Teko::BlockedLinearOp A = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
-  auto handle             = Teko::KrylovSurrogateHandle::create();
+  auto handle             = Teko::KrylovSurrogate::Handle::create();
   auto invLib = Teko::InverseLibrary::buildFromParameterList(inverseLibraryList(handle));
 
   Teko::LinearOp surrogate = Teko::buildInverse(*invLib->getInverseFactory("Surrogate"), A);
@@ -103,7 +105,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, report_from_a_solve) {
   Thyra::update(-1.0, *xb, xs.ptr());
   TEST_ASSERT(maxAbs(xs) == 0.0);
 
-  Teko::KrylovSurrogateReport report = handle->buildReport();
+  Teko::KrylovSurrogate::Report report = handle->buildReport();
   out << "iterations " << itS << ", samples " << report.numSamples << ", basis sizes";
   for (int r : report.basisSizes) out << " " << r;
   out << ", diagonal deviations";
@@ -133,6 +135,13 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, report_from_a_solve) {
   }
   TEST_EQUALITY(report.searchRanks, Tpetra::getDefaultComm()->getSize());
 
+  // the cost shows up in the application's timer summary
+  for (const char* name :
+       {"Teko Krylov Surrogate: Build Surrogate", "Teko Krylov Surrogate: Search"}) {
+    auto timer = Teuchos::TimeMonitor::lookupCounter(name);
+    TEST_ASSERT(timer != Teuchos::null && timer->numCalls() > 0);
+  }
+
   auto pl = report.toParameterList();
   TEST_ASSERT(pl->isParameter("C_hat"));
   TEST_ASSERT(pl->sublist("Candidates").isSublist("Candidate 12"));
@@ -140,7 +149,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, report_from_a_solve) {
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, warm_start_and_rebuild) {
   Teko::BlockedLinearOp A = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
-  auto handle             = Teko::KrylovSurrogateHandle::create();
+  auto handle             = Teko::KrylovSurrogate::Handle::create();
   auto invLib  = Teko::InverseLibrary::buildFromParameterList(inverseLibraryList(handle));
   auto factory = invLib->getInverseFactory("Surrogate");
 
@@ -173,7 +182,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, warm_start_and_rebuild) {
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, through_stratimikos) {
   Teko::BlockedLinearOp A = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
-  auto handle             = Teko::KrylovSurrogateHandle::create();
+  auto handle             = Teko::KrylovSurrogate::Handle::create();
 
   Stratimikos::DefaultLinearSolverBuilder builder;
   Teko::addTekoToStratimikosBuilder(builder);
@@ -200,7 +209,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, through_stratimikos) {
   Thyra::solve<double>(*lows, Thyra::NOTRANS, *b, x.ptr());
 
   TEST_ASSERT(handle->isAttached());
-  Teko::KrylovSurrogateReport report = handle->buildReport();
+  Teko::KrylovSurrogate::Report report = handle->buildReport();
   TEST_ASSERT(report.numSamples > 0);
   TEST_EQUALITY(report.candidates.size(), 13u);
 }
@@ -208,23 +217,23 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, through_stratimikos) {
 TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, errors) {
   Teko::BlockedLinearOp A = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
 
-  // no handle
+  // no handle, and nothing printed: the report could never be seen
   {
-    ParameterList ifl = inverseLibraryList(Teko::KrylovSurrogateHandle::create());
+    ParameterList ifl = inverseLibraryList(Teko::KrylovSurrogate::Handle::create());
     ifl.sublist("Surrogate").remove("Report Handle");
     auto invLib = Teko::InverseLibrary::buildFromParameterList(ifl);
     TEST_THROW(invLib->getInverseFactory("Surrogate"), std::runtime_error);
   }
   // a misspelled option
   {
-    ParameterList ifl = inverseLibraryList(Teko::KrylovSurrogateHandle::create());
+    ParameterList ifl = inverseLibraryList(Teko::KrylovSurrogate::Handle::create());
     ifl.sublist("Surrogate").set("Maximum Sample", 10);
     auto invLib = Teko::InverseLibrary::buildFromParameterList(ifl);
     TEST_THROW(invLib->getInverseFactory("Surrogate"), Teuchos::Exceptions::InvalidParameter);
   }
   // a report before any build, and before any solve
   {
-    auto handle = Teko::KrylovSurrogateHandle::create();
+    auto handle = Teko::KrylovSurrogate::Handle::create();
     TEST_THROW(handle->buildReport(), std::runtime_error);
     auto invLib         = Teko::InverseLibrary::buildFromParameterList(inverseLibraryList(handle));
     Teko::LinearOp prec = Teko::buildInverse(*invLib->getInverseFactory("Surrogate"), A);
@@ -232,10 +241,98 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, errors) {
   }
   // an operator that is not blocked
   {
-    auto handle = Teko::KrylovSurrogateHandle::create();
+    auto handle = Teko::KrylovSurrogate::Handle::create();
     auto invLib = Teko::InverseLibrary::buildFromParameterList(inverseLibraryList(handle));
     Teko::LinearOp single = Teko::getBlock(0, 0, A);
     TEST_THROW(Teko::buildInverse(*invLib->getInverseFactory("Surrogate"), single),
                std::runtime_error);
+  }
+}
+
+TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, hierarchical_gauss_seidel_form) {
+  // The form a candidate is reported in must mean what the surrogate scored.
+  // With single-block groups: the identity ordering is lower block
+  // Gauss-Seidel, and the reversed ordering is upper block Gauss-Seidel.
+  Teko::BlockedLinearOp A = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
+  auto invLib             = Teko::InverseLibrary::buildFromParameterList(
+                  inverseLibraryList(Teko::KrylovSurrogate::Handle::create()));
+  ParameterList upper;
+  upper.set("Type", "Block Gauss-Seidel");
+  upper.set("Inverse Type", "Amesos2");
+  upper.set("Use Upper Triangle", true);
+  invLib->addInverse("BGS Upper", upper);
+  invLib->addInverse("Identity Form",
+                     Teko::KrylovSurrogate::asHierarchicalGaussSeidel({0, 1, 2}, "Amesos2", "BGS"));
+  invLib->addInverse("Reversed Form",
+                     Teko::KrylovSurrogate::asHierarchicalGaussSeidel({2, 1, 0}, "Amesos2", "BGS"));
+  invLib->addInverse("Merged Form",
+                     Teko::KrylovSurrogate::asHierarchicalGaussSeidel({0, 0, 1}, "Amesos2", "BGS"));
+
+  Teko::MultiVector x = Thyra::createMembers(A->range(), 1);
+  fillBlocked(x, [](int j, int r, int) { return std::sin(1.0 + r + 3.0 * j); });
+  auto applied = [&](const std::string& name) {
+    Teko::LinearOp op   = Teko::buildInverse(*invLib->getInverseFactory(name), A);
+    Teko::MultiVector y = Thyra::createMembers(A->domain(), 1);
+    op->apply(Thyra::NOTRANS, *x, y.ptr(), 1.0, 0.0);
+    return y;
+  };
+  auto difference = [&](const std::string& a, const std::string& b) {
+    Teko::MultiVector d = applied(a);
+    Thyra::update(-1.0, *applied(b), d.ptr());
+    return maxAbs(d);
+  };
+
+  out << "identity vs lower: " << difference("Identity Form", "BGS")
+      << ", reversed vs upper: " << difference("Reversed Form", "BGS Upper") << "\n";
+  TEST_ASSERT(difference("Identity Form", "BGS") < 1e-12);
+  TEST_ASSERT(difference("Reversed Form", "BGS Upper") < 1e-12);
+  TEST_NOTHROW(applied("Merged Form"));
+
+  // a merged group is written with the merged inverse, blocks numbered from 1
+  ParameterList merged = Teko::KrylovSurrogate::asHierarchicalGaussSeidel({1, 0, 1}, "", "");
+  TEST_EQUALITY(merged.sublist("Hierarchical Block 1").get<std::string>("Included Subblocks"), "2");
+  TEST_EQUALITY(merged.sublist("Hierarchical Block 2").get<std::string>("Included Subblocks"),
+                "1,3");
+  TEST_EQUALITY(merged.sublist("Hierarchical Block 2").get<std::string>("Inverse Type"),
+                "<Merged Inverse Type>");
+  TEST_EQUALITY(merged.get<bool>("Use Upper Triangle"), false);
+}
+
+TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, print_at_rebuild_without_a_handle) {
+  // An application configured only from XML: no handle, the report printed
+  Teko::BlockedLinearOp A = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
+  ParameterList ifl       = inverseLibraryList(Teko::KrylovSurrogate::Handle::create());
+  ifl.sublist("Surrogate").remove("Report Handle");
+  ifl.sublist("Surrogate").sublist("Report").set("Print", true);
+  ifl.sublist("Surrogate").sublist("Report").set("Inverse Type", "Amesos2");
+  ifl.sublist("Surrogate").sublist("Report").set("Merged Inverse Type", "BGS");
+  auto invLib  = Teko::InverseLibrary::buildFromParameterList(ifl);
+  auto factory = invLib->getInverseFactory("Surrogate");
+
+  std::ostringstream captured;
+  auto previous = Teuchos::VerboseObjectBase::getDefaultOStream();
+  Teuchos::VerboseObjectBase::setDefaultOStream(
+      Teuchos::fancyOStream(Teuchos::rcpFromRef(captured)));
+
+  Teko::ModifiableLinearOp prec = Teko::buildInverse(*factory, A);
+  Teko::MultiVector b           = rhs(A);
+  Teko::MultiVector x           = Thyra::createMembers(A->domain(), 1);
+  Thyra::assign(x.ptr(), 0.0);
+  solve(A, prec, b, x);
+  const bool silentBeforeRebuild = captured.str().empty();
+  Teko::rebuildInverse(*factory, A, prec);
+
+  Teuchos::VerboseObjectBase::setDefaultOStream(previous);
+  out << captured.str();
+
+  TEST_ASSERT(silentBeforeRebuild);
+  if (Tpetra::getDefaultComm()->getRank() == 0) {
+    TEST_ASSERT(captured.str().find("Teko Krylov Surrogate report: 3 blocks") != std::string::npos);
+    TEST_ASSERT(captured.str().find("Hierarchical Block Gauss-Seidel") != std::string::npos);
+    // the best is all-merged here, so the merged inverse is named, and no placeholder
+    TEST_ASSERT(captured.str().find("value=\"BGS\"") != std::string::npos);
+    TEST_ASSERT(captured.str().find("Inverse Type&gt;") == std::string::npos);
+  } else {
+    TEST_ASSERT(captured.str().empty());
   }
 }

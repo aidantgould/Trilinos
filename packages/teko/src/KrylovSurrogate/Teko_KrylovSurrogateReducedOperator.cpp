@@ -132,7 +132,7 @@ Teuchos::RCP<const Tpetra::Operator<ST, LO, GO, NT> > tpetraBlock(const BlockedL
 }
 
 void buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z, const MultiVector& v1,
-                          double truncationTol, KrylovSurrogateReport& out) {
+                          double truncationTol, Report& out) {
   const int nb = blockRowCount(A);
   const int m  = static_cast<int>(Z->domain()->dim());
 

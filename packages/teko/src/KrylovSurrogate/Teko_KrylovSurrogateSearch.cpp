@@ -263,9 +263,10 @@ DenseMatrix gaussSeidelSelection(const DenseMatrix& C, const std::vector<int>& b
   return S;
 }
 
-std::vector<KrylovSurrogateReport::Candidate> scoreCandidates(
-    const DenseMatrix& C, const DenseVector& b, const std::vector<int>& basisSizes,
-    const std::vector<std::vector<int> >& candidates, double tol, const Teuchos::Comm<int>& comm) {
+std::vector<Report::Candidate> scoreCandidates(const DenseMatrix& C, const DenseVector& b,
+                                               const std::vector<int>& basisSizes,
+                                               const std::vector<std::vector<int> >& candidates,
+                                               double tol, const Teuchos::Comm<int>& comm) {
   TEUCHOS_TEST_FOR_EXCEPTION(b.normFrobenius() == 0.0, std::runtime_error,
                              "Teko \"Krylov Surrogate\": the initial residual has no component in "
                              "the trained subspace, so there is nothing to score");
@@ -287,7 +288,7 @@ std::vector<KrylovSurrogateReport::Candidate> scoreCandidates(
   if (nc > 0)
     Teuchos::reduceAll<int, double>(comm, Teuchos::REDUCE_SUM, 4 * nc, mine.data(), all.data());
 
-  std::vector<KrylovSurrogateReport::Candidate> out(nc);
+  std::vector<Report::Candidate> out(nc);
   std::vector<int> status(nc);
   for (int i = 0; i < nc; ++i) {
     status[i]                    = static_cast<int>(all[4 * i + 0]);
@@ -305,7 +306,7 @@ std::vector<KrylovSurrogateReport::Candidate> scoreCandidates(
     if (out[x].iterations != out[y].iterations) return out[x].iterations < out[y].iterations;
     return out[x].rate < out[y].rate;
   });
-  std::vector<KrylovSurrogateReport::Candidate> sorted;
+  std::vector<Report::Candidate> sorted;
   for (int i : order) sorted.push_back(out[i]);
   return sorted;
 }

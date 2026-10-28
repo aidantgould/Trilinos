@@ -15,12 +15,13 @@
 #include "Teko_KrylovSurrogateReport.hpp"
 
 namespace Teko {
+namespace KrylovSurrogate {
 
 /** \brief Wraps any Teko block inverse, unchanged, and records what a Krylov
  *         surrogate of the preconditioned operator needs.
  *
  * After a right-preconditioned flexible GMRES solve with this preconditioner,
- * the handle from the parameter list returns a KrylovSurrogateReport: the
+ * the handle from the parameter list returns a Report: the
  * reduced operator \f$\hat{C}\f$, the reduced right-hand side \f$\hat{b}\f$, and how
  * each of a set of alternative lower block Gauss-Seidel configurations
  * converges on the surrogate. The operator must be blocked, with every nonzero
@@ -28,7 +29,7 @@ namespace Teko {
  * TSQR.
  *
  \code
-    auto handle = Teko::KrylovSurrogateHandle::create();
+    auto handle = Teko::KrylovSurrogate::Handle::create();
     params.sublist("Surrogate GS").set("Report Handle", handle);
  \endcode
  *
@@ -49,20 +50,30 @@ namespace Teko {
            <Parameter name="merge 0 and 1" type="Array(int)" value="{0,0,1}"/>
          </ParameterList>
        </ParameterList>
+       <ParameterList name="Report">                       <!-- optional -->
+         <!-- Print a summary to Teko's output stream at each rebuild, covering
+              the solves since the previous build. Default false. -->
+         <Parameter name="Print" type="bool" value="false"/>
+         <!-- Inverses written into each candidate's Hierarchical Block
+              Gauss-Seidel list: single-block groups, and merged groups (which
+              get a blocked operator). Placeholders if unset. -->
+         <Parameter name="Inverse Type" type="string" value="<Some Inverse>"/>
+         <Parameter name="Merged Inverse Type" type="string" value="<Some Block Inverse>"/>
+       </ParameterList>
      </ParameterList>
  \endcode
  *
- * The "Report Handle" (a Teuchos::RCP<Teko::KrylovSurrogateHandle>) is
- * required, and is set from code: see KrylovSurrogateHandle.
+ * A "Report Handle" (a Teuchos::RCP<Teko::KrylovSurrogate::Handle>, set from
+ * code: see Handle) gives the report to the application. One of it and
+ * "Report" > "Print" is required, or the report could never be seen.
  */
-class KrylovSurrogatePreconditionerFactory : public virtual Teko::PreconditionerFactory {
+class PreconditionerFactory : public virtual Teko::PreconditionerFactory {
  public:
   //! Default constructor, for use with the AutoClone class.
-  KrylovSurrogatePreconditionerFactory();
+  PreconditionerFactory();
 
-  KrylovSurrogatePreconditionerFactory(const Teuchos::RCP<Teko::InverseFactory>& invFactory,
-                                       const Teuchos::RCP<KrylovSurrogateHandle>& handle,
-                                       const KrylovSurrogateOptions& options);
+  PreconditionerFactory(const Teuchos::RCP<Teko::InverseFactory>& invFactory,
+                        const Teuchos::RCP<Handle>& handle, const Options& options);
 
   virtual LinearOp buildPreconditionerOperator(LinearOp& lo, PreconditionerState& state) const;
 
@@ -74,10 +85,11 @@ class KrylovSurrogatePreconditionerFactory : public virtual Teko::Preconditioner
 
  private:
   Teuchos::RCP<Teko::InverseFactory> invFactory_;
-  Teuchos::RCP<KrylovSurrogateHandle> handle_;
-  KrylovSurrogateOptions options_;
+  Teuchos::RCP<Handle> handle_;
+  Options options_;
 };
 
+}  // namespace KrylovSurrogate
 }  // end namespace Teko
 
 #endif

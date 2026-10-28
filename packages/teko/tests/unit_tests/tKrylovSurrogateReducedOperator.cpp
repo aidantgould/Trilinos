@@ -21,7 +21,7 @@
 #include "tKrylovSurrogateProblem.hpp"
 
 using namespace KrylovSurrogateTest;
-typedef Teko::KrylovSurrogateReport Report;
+typedef Teko::KrylovSurrogate::Report Report;
 
 namespace {
 

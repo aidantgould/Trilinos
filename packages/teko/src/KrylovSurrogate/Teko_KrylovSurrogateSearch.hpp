@@ -67,9 +67,10 @@ DenseMatrix gaussSeidelSelection(const DenseMatrix& C, const std::vector<int>& b
  * dealt round-robin over the ranks of comm and gathered, so the result is
  * bitwise identical on every rank. Collective.
  */
-std::vector<KrylovSurrogateReport::Candidate> scoreCandidates(
-    const DenseMatrix& C, const DenseVector& b, const std::vector<int>& basisSizes,
-    const std::vector<std::vector<int> >& candidates, double tol, const Teuchos::Comm<int>& comm);
+std::vector<Report::Candidate> scoreCandidates(const DenseMatrix& C, const DenseVector& b,
+                                               const std::vector<int>& basisSizes,
+                                               const std::vector<std::vector<int> >& candidates,
+                                               double tol, const Teuchos::Comm<int>& comm);
 
 }  // namespace KrylovSurrogate
 }  // end namespace Teko

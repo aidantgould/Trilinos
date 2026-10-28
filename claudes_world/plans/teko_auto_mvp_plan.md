@@ -852,3 +852,36 @@ could go into proto1 as they stand:
 Options 1 and 2 (applying) are the decisions that shape the rest of the full build.
 Option 3 should be prototyped and timed before either of them is built, because if its
 cost is acceptable it removes the second implementation of "configuration".
+
+### Obvious wins, as applied (2026-10-28, on proto1)
+
+All four are in, and everything still passes: Teko's 24 tests, and the pyfront test
+16/16 at 1 and 4 ranks.
+
+- **Hierarchical GS form.** `asHierarchicalGaussSeidel(ordering, inverse, mergedInverse)`
+  is in `Teko_KrylovSurrogateReport.hpp`, and every candidate carries its list in
+  `Candidate::asHierarchicalGaussSeidel`. Groups and blocks are numbered from 1, and
+  `"Use Upper Triangle" = false`, since Teko's Hierarchical GS sweeps upper by
+  default.
+  - A test builds the lists and applies them. The identity ordering matches
+    `"Block Gauss-Seidel"` and the reversed ordering matches it with
+    `"Use Upper Triangle"`, both to a difference of 0, so the reported form means what
+    the surrogate scored.
+  - Every group needs an `"Inverse Type"` the surrogate cannot know. They come from
+    two new options, `"Report"` > `"Inverse Type"` and `"Merged Inverse Type"` (a merged
+    group receives a blocked operator), with placeholders when unset.
+- **Folder and namespace.** The code is in `src/KrylovSurrogate/`, with
+  `Teko::KrylovSurrogate::{Options, Report, Handle, RecorderOp,
+  PreconditionerFactory}`. That last name equals its base's, so the base is always
+  written `Teko::PreconditionerFactory`. File names are unchanged.
+- **Printing.** `"Report"` > `"Print"` prints `Report::print` on rank 0 to
+  `Teko::getOutputStream()`, at each rebuild, covering the solves since the previous
+  build.
+  - With it on, the `"Report Handle"` is optional; the factory then keeps its own. A
+    test runs the XML-only case end to end, capturing Teuchos's default stream.
+  - The best candidate prints as hand-written-style XML, through a small writer,
+    because Teuchos's writer adds `docString`, `id`, `isDefault` and `isUsed` to
+    every entry.
+- **Timers.** `Teko Krylov Surrogate: Build Surrogate` and `...: Search` are Teuchos
+  timers, and a test checks both ran. `Report::searchWallTime` was removed (the
+  timers replace it), along with the pyfront `search_wall_time` key.

@@ -13,28 +13,31 @@
 
 #include "Teuchos_Array.hpp"
 
+#include "Tpetra_Map.hpp"
+
 #include "Teko_InverseLibrary.hpp"
 #include "Teko_KrylovSurrogateRecorderOp.hpp"
 #include "Teko_KrylovSurrogateReducedOperator.hpp"
 #include "Teko_KrylovSurrogateSearch.hpp"
 
 namespace Teko {
+namespace KrylovSurrogate {
 
 namespace {
 
-typedef Teuchos::RCP<KrylovSurrogateHandle> Handle;
+typedef Teuchos::RCP<Handle> HandlePtr;
 
 // Every option, with its default and documentation. Validating against this
 // makes an unknown or mistyped option an error, so a misspelling does not
 // silently do nothing.
 Teuchos::RCP<const Teuchos::ParameterList> validParameters() {
-  const KrylovSurrogateOptions defaults;
+  const Options defaults;
   auto pl = Teuchos::rcp(new Teuchos::ParameterList);
   pl->set("Type", std::string("Krylov Surrogate"), "Selects this preconditioner");
   pl->set("Inverse Factory", std::string(""),
           "The Teko block inverse applied, and recorded (required)");
-  pl->set("Report Handle", Handle(),
-          "The Teko::KrylovSurrogateHandle the report is retrieved from (required, set from code)");
+  pl->set("Report Handle", HandlePtr(),
+          "The Teko::KrylovSurrogate::Handle the report is retrieved from (set from code)");
   pl->set("Maximum Samples", defaults.maxSamples,
           "Columns of preconditioner output kept, each a full-length vector of memory");
   pl->set("Truncation Tolerance", defaults.truncationTol,
@@ -46,20 +49,28 @@ Teuchos::RCP<const Teuchos::ParameterList> validParameters() {
   search.set("Seed", defaults.seed, "Seed for sampling candidates");
   search.sublist("Orderings", false, "Orderings always scored, each an Array(int)")
       .disableRecursiveValidation();
+  Teuchos::ParameterList& report = pl->sublist("Report", false, "What is done with the report");
+  report.set("Print", defaults.printReport,
+             "Print a summary to Teko's output stream at each rebuild");
+  report.set(
+      "Inverse Type", defaults.inverseType,
+      "Inverse of single-block groups in the reported Hierarchical Block Gauss-Seidel lists");
+  report.set("Merged Inverse Type", defaults.mergedInverseType,
+             "Inverse of merged groups in those lists; it receives a blocked operator");
   return pl;
 }
 
 }  // namespace
 
-KrylovSurrogatePreconditionerFactory::KrylovSurrogatePreconditionerFactory() {}
+PreconditionerFactory::PreconditionerFactory() {}
 
-KrylovSurrogatePreconditionerFactory::KrylovSurrogatePreconditionerFactory(
-    const Teuchos::RCP<Teko::InverseFactory>& invFactory,
-    const Teuchos::RCP<KrylovSurrogateHandle>& handle, const KrylovSurrogateOptions& options)
+PreconditionerFactory::PreconditionerFactory(const Teuchos::RCP<Teko::InverseFactory>& invFactory,
+                                             const Teuchos::RCP<Handle>& handle,
+                                             const Options& options)
     : invFactory_(invFactory), handle_(handle), options_(options) {}
 
-LinearOp KrylovSurrogatePreconditionerFactory::buildPreconditionerOperator(
-    LinearOp& lo, PreconditionerState& state) const {
+LinearOp PreconditionerFactory::buildPreconditionerOperator(LinearOp& lo,
+                                                            PreconditionerState& state) const {
 #ifndef TEKO_HAVE_KRYLOV_SURROGATE
   (void)lo;
   (void)state;
@@ -78,23 +89,29 @@ LinearOp KrylovSurrogatePreconditionerFactory::buildPreconditionerOperator(
                              "physics field");
   const int nb = blockRowCount(blo);
   for (int i = 0; i < nb; ++i)
-    for (int j = 0; j < nb; ++j) KrylovSurrogate::tpetraBlock(blo, i, j);  // throws if not Tpetra
+    for (int j = 0; j < nb; ++j) tpetraBlock(blo, i, j);  // throws if not Tpetra
   for (const auto& o : options_.orderings)
-    TEUCHOS_TEST_FOR_EXCEPTION(!KrylovSurrogate::isValidOrdering(o, nb), std::invalid_argument,
+    TEUCHOS_TEST_FOR_EXCEPTION(!isValidOrdering(o, nb), std::invalid_argument,
                                "Teko \"Krylov Surrogate\": an ordering in \"Orderings\" is not a "
                                "valid ordering of the operator's "
                                    << nb << " blocks");
 
   ModifiableLinearOp& recorderOp = state.getModifiableOp("krylovSurrogateOp");
-  Teuchos::RCP<KrylovSurrogateRecorderOp> recorder;
+  Teuchos::RCP<RecorderOp> recorder;
   if (recorderOp == Teuchos::null) {
-    recorder = Teuchos::rcp(
-        new KrylovSurrogateRecorderOp(Teko::buildInverse(*invFactory_, lo), options_.maxSamples));
+    recorder =
+        Teuchos::rcp(new RecorderOp(Teko::buildInverse(*invFactory_, lo), options_.maxSamples));
     recorderOp = recorder;
   } else {
-    recorder               = Teuchos::rcp_dynamic_cast<KrylovSurrogateRecorderOp>(recorderOp, true);
+    recorder               = Teuchos::rcp_dynamic_cast<RecorderOp>(recorderOp, true);
     ModifiableLinearOp inv = recorder->getModifiableOp();
     Teko::rebuildInverse(*invFactory_, lo, inv);
+    // Report the solves since the previous build before forgetting them
+    if (options_.printReport && recorder->numSamples() > 0) {
+      const Report report = handle_->buildReport();
+      if (tpetraBlock(blo, 0, 0)->getRangeMap()->getComm()->getRank() == 0)
+        report.print(*Teko::getOutputStream());
+    }
     recorder->clearSamples();
   }
 
@@ -103,17 +120,23 @@ LinearOp KrylovSurrogatePreconditionerFactory::buildPreconditionerOperator(
 #endif
 }
 
-void KrylovSurrogatePreconditionerFactory::initializeFromParameterList(
-    const Teuchos::ParameterList& settings) {
+void PreconditionerFactory::initializeFromParameterList(const Teuchos::ParameterList& settings) {
   Teuchos::ParameterList pl(settings);
   pl.validateParametersAndSetDefaults(*validParameters());
 
-  handle_ = pl.get<Handle>("Report Handle");
+  const Teuchos::ParameterList& report = pl.sublist("Report");
+  options_.printReport                 = report.get<bool>("Print");
+  options_.inverseType                 = report.get<std::string>("Inverse Type");
+  options_.mergedInverseType           = report.get<std::string>("Merged Inverse Type");
+
+  // Without a handle from the application, the factory keeps its own, used for printing
+  handle_ = pl.get<HandlePtr>("Report Handle");
   TEUCHOS_TEST_FOR_EXCEPTION(
-      handle_ == Teuchos::null, std::runtime_error,
-      "Teko \"Krylov Surrogate\" requires a \"Report Handle\", a "
-      "Teuchos::RCP<Teko::KrylovSurrogateHandle> set from code. Without one the report could "
-      "never be retrieved. See Teko::KrylovSurrogateHandle.");
+      handle_ == Teuchos::null && !options_.printReport, std::runtime_error,
+      "Teko \"Krylov Surrogate\" needs a \"Report Handle\" (a "
+      "Teuchos::RCP<Teko::KrylovSurrogate::Handle> set from code) or \"Report\" > \"Print\" = "
+      "true. Without either, the report could never be seen.");
+  if (handle_ == Teuchos::null) handle_ = Handle::create();
   const std::string invName = pl.get<std::string>("Inverse Factory");
   TEUCHOS_TEST_FOR_EXCEPTION(invName.empty(), std::runtime_error,
                              "Parameter \"Inverse Factory\" is required by Teko \"Krylov "
@@ -144,18 +167,17 @@ void KrylovSurrogatePreconditionerFactory::initializeFromParameterList(
                              "ERROR: \"Inverse Factory\" = " << invName << " could not be found");
 }
 
-Teuchos::RCP<Teuchos::ParameterList> KrylovSurrogatePreconditionerFactory::getRequestedParameters()
-    const {
+Teuchos::RCP<Teuchos::ParameterList> PreconditionerFactory::getRequestedParameters() const {
   TEUCHOS_TEST_FOR_EXCEPTION(invFactory_ == Teuchos::null, std::runtime_error,
                              "Teko \"Krylov Surrogate\": no \"Inverse Factory\" has been set");
   return invFactory_->getRequestedParameters();
 }
 
-bool KrylovSurrogatePreconditionerFactory::updateRequestedParameters(
-    const Teuchos::ParameterList& pl) {
+bool PreconditionerFactory::updateRequestedParameters(const Teuchos::ParameterList& pl) {
   TEUCHOS_TEST_FOR_EXCEPTION(invFactory_ == Teuchos::null, std::runtime_error,
                              "Teko \"Krylov Surrogate\": no \"Inverse Factory\" has been set");
   return invFactory_->updateRequestedParameters(pl);
 }
 
+}  // namespace KrylovSurrogate
 }  // end namespace Teko

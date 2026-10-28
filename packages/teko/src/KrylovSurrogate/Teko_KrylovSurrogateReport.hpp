@@ -16,6 +16,7 @@
 #ifndef __Teko_KrylovSurrogateReport_hpp__
 #define __Teko_KrylovSurrogateReport_hpp__
 
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -37,12 +38,13 @@
 #endif
 
 namespace Teko {
+namespace KrylovSurrogate {
 
-class KrylovSurrogateRecorderOp;
+class RecorderOp;
 
 /** \brief Options of a "Krylov Surrogate" inverse, read from its parameter list.
  */
-struct KrylovSurrogateOptions {
+struct Options {
   //! Columns of preconditioner output kept for the surrogate
   int maxSamples = 100;
   //! Singular values kept per block: sigma_k >= truncationTol * sigma_1
@@ -55,7 +57,24 @@ struct KrylovSurrogateOptions {
   int seed = 0;
   //! Orderings the user asked for, always scored
   std::vector<std::vector<int> > orderings;
+  //! Print a summary to Teko's output stream at each rebuild
+  bool printReport = false;
+  //! Inverses named in the candidates' Hierarchical Block Gauss-Seidel lists:
+  //! for single-block groups, and for merged groups (which get a blocked operator)
+  std::string inverseType, mergedInverseType;
 };
+
+/** \brief An ordering as a Teko "Hierarchical Block Gauss-Seidel" parameter list,
+ *         ready to paste into an inverse library.
+ *
+ * Group g becomes "Hierarchical Block g+1", holding its blocks (numbered from 1)
+ * and an inverse: inverseType for a single block, mergedInverseType for a merged
+ * group. The sweep is lower triangular, as the surrogate scored it. An empty
+ * name is written as a placeholder to fill in.
+ */
+Teuchos::ParameterList asHierarchicalGaussSeidel(const std::vector<int>& ordering,
+                                                 const std::string& inverseType,
+                                                 const std::string& mergedInverseType);
 
 /** \brief What one solve's Krylov data predicts about alternative block
  *        configurations.
@@ -65,16 +84,18 @@ struct KrylovSurrogateOptions {
  * block Gauss-Seidel configuration: <code>ordering[k]</code> is the position of
  * block <code>k</code>'s group, and blocks sharing a position are solved together.
  */
-struct KrylovSurrogateReport {
+struct Report {
   struct Candidate {
     std::vector<int> ordering;
     //! "converged", "max iterations", "singular group block" or "solver error"
     std::string status;
     int iterations = 0;
-    //! \f$\|\hat{b} - K y\| / \|\hat{b}\|\f$, recomputed after the solve
+    //! \f$\|\hat{b} - K y\| / \|\hat{b}\|\f$ at the end of the surrogate solve
     double finalRelativeResidual = 0.0;
     //! finalRelativeResidual^(1/iterations), the average reduction per iteration
     double rate = 0.0;
+    //! The same configuration as a Teko inverse library entry
+    Teuchos::ParameterList asHierarchicalGaussSeidel;
   };
 
   int numBlocks  = 0;
@@ -91,12 +112,14 @@ struct KrylovSurrogateReport {
   std::vector<double> diagonalDeviations;
   //! Converged first, then fewest iterations, then best rate
   std::vector<Candidate> candidates;
-  //! Wall time of the candidate search, maximum over ranks
-  double searchWallTime = 0.0;
-  int searchRanks       = 1;
+  //! MPI ranks the candidates were dealt over
+  int searchRanks = 1;
 
   //! The whole report as a parameter list, for logging or output
   Teuchos::RCP<Teuchos::ParameterList> toParameterList() const;
+
+  //! A summary: the surrogate, the best candidates, and the best as XML
+  void print(std::ostream& os, int maxCandidates = 10) const;
 };
 
 /** \brief Collects the surrogate report of a "Krylov Surrogate" inverse.
@@ -104,13 +127,14 @@ struct KrylovSurrogateReport {
  * Create one, put it in the inverse's parameter list as "Report Handle", build
  * the preconditioner by any route (Teko::buildInverse, a Teko preconditioner
  * handed to Belos, or Stratimikos with Teko as the preconditioner), solve with
- * right-preconditioned flexible GMRES, then call buildReport().
+ * right-preconditioned flexible GMRES, then call buildReport(). An application
+ * configured only from XML can use "Report" > "Print" instead.
  *
  \code
-    auto handle = Teko::KrylovSurrogateHandle::create();
+    auto handle = Teko::KrylovSurrogate::Handle::create();
     inverseLibraryParams.sublist("Surrogate GS").set("Report Handle", handle);
     // ... build and solve ...
-    Teko::KrylovSurrogateReport report = handle->buildReport();
+    Teko::KrylovSurrogate::Report report = handle->buildReport();
  \endcode
  *
  * The handle refers to the preconditioner most recently built or rebuilt from
@@ -119,35 +143,36 @@ struct KrylovSurrogateReport {
  * vector the preconditioner was applied to, which in right-preconditioned
  * GMRES is the initial residual, so warm-started solves are handled as such.
  */
-class KrylovSurrogateHandle {
+class Handle {
  public:
-  static Teuchos::RCP<KrylovSurrogateHandle> create();
+  static Teuchos::RCP<Handle> create();
 
   /** \brief Build the report from what has been recorded so far.
    *
    * Collective: every rank of the operator's communicator must call it, and
    * every rank gets the same report.
    */
-  KrylovSurrogateReport buildReport() const;
+  Report buildReport() const;
 
   //! Called by the factory on every build; not for users
-  void attach(const Teuchos::RCP<const KrylovSurrogateRecorderOp>& recorder,
-              const BlockedLinearOp& A, const KrylovSurrogateOptions& options);
+  void attach(const Teuchos::RCP<const RecorderOp>& recorder, const BlockedLinearOp& A,
+              const Options& options);
 
   //! Whether a preconditioner has been attached
   bool isAttached() const { return recorder_ != Teuchos::null; }
 
   //! The recorder of the attached preconditioner (null if none), mainly for testing
-  Teuchos::RCP<const KrylovSurrogateRecorderOp> getRecorder() const { return recorder_; }
+  Teuchos::RCP<const RecorderOp> getRecorder() const { return recorder_; }
 
  private:
-  KrylovSurrogateHandle() = default;
+  Handle() = default;
 
-  Teuchos::RCP<const KrylovSurrogateRecorderOp> recorder_;
+  Teuchos::RCP<const RecorderOp> recorder_;
   BlockedLinearOp A_;
-  KrylovSurrogateOptions options_;
+  Options options_;
 };
 
+}  // namespace KrylovSurrogate
 }  // end namespace Teko
 
 #endif

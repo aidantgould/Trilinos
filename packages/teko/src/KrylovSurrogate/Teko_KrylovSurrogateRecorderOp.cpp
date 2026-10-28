@@ -14,19 +14,20 @@
 #include "Thyra_MultiVectorStdOps.hpp"
 
 namespace Teko {
+namespace KrylovSurrogate {
 
-KrylovSurrogateRecorderOp::KrylovSurrogateRecorderOp(const ModifiableLinearOp& prec, int maxSamples)
+RecorderOp::RecorderOp(const ModifiableLinearOp& prec, int maxSamples)
     : prec_(prec), maxSamples_(maxSamples), count_(0) {
   TEUCHOS_TEST_FOR_EXCEPTION(prec_ == Teuchos::null, std::invalid_argument,
-                             "Teko::KrylovSurrogateRecorderOp: the preconditioner is null");
+                             "Teko::KrylovSurrogate::RecorderOp: the preconditioner is null");
   TEUCHOS_TEST_FOR_EXCEPTION(maxSamples_ < 1, std::invalid_argument,
-                             "Teko::KrylovSurrogateRecorderOp: \"Maximum Samples\" must be at "
+                             "Teko::KrylovSurrogate::RecorderOp: \"Maximum Samples\" must be at "
                              "least 1, got "
                                  << maxSamples_);
 }
 
-void KrylovSurrogateRecorderOp::implicitApply(const MultiVector& x, MultiVector& y,
-                                              const double alpha, const double beta) const {
+void RecorderOp::implicitApply(const MultiVector& x, MultiVector& y, const double alpha,
+                               const double beta) const {
   // x arrives const-only, so take a const view of it
   const Teuchos::RCP<const Thyra::MultiVectorBase<double> > cx = x;
   if (firstInput_ == Teuchos::null && cx->domain()->dim() > 0)
@@ -50,7 +51,7 @@ void KrylovSurrogateRecorderOp::implicitApply(const MultiVector& x, MultiVector&
   }
 }
 
-void KrylovSurrogateRecorderOp::record(const MultiVector& z) const {
+void RecorderOp::record(const MultiVector& z) const {
   const int room = maxSamples_ - count_;
   const int cols = std::min(room, static_cast<int>(z->domain()->dim()));
   if (cols <= 0) return;
@@ -63,21 +64,22 @@ void KrylovSurrogateRecorderOp::record(const MultiVector& z) const {
   count_ += cols;
 }
 
-void KrylovSurrogateRecorderOp::clearSamples() {
+void RecorderOp::clearSamples() {
   count_      = 0;
   firstInput_ = Teuchos::null;
 }
 
-MultiVector KrylovSurrogateRecorderOp::getSamples() const {
+MultiVector RecorderOp::getSamples() const {
   if (count_ == 0) return Teuchos::null;
   return store_->subView(Teuchos::Range1D(0, count_ - 1));
 }
 
-void KrylovSurrogateRecorderOp::describe(Teuchos::FancyOStream& out_arg,
-                                         const Teuchos::EVerbosityLevel verbLevel) const {
-  out_arg << "Teko::KrylovSurrogateRecorderOp: " << count_ << " of " << maxSamples_
+void RecorderOp::describe(Teuchos::FancyOStream& out_arg,
+                          const Teuchos::EVerbosityLevel verbLevel) const {
+  out_arg << "Teko::KrylovSurrogate::RecorderOp: " << count_ << " of " << maxSamples_
           << " samples recorded, wrapping:\n";
   prec_->describe(out_arg, verbLevel);
 }
 
+}  // namespace KrylovSurrogate
 }  // end namespace Teko

@@ -62,7 +62,7 @@ Teko::MultiVector filled(const Teko::LinearOp& op, int cols, double seed) {
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, records_outputs_in_order) {
   Teko::ModifiableLinearOp M = diagonalOp(12);
-  Teko::KrylovSurrogateRecorderOp rec(M, 5);
+  Teko::KrylovSurrogate::RecorderOp rec(M, 5);
 
   Teko::MultiVector x1 = filled(M, 2, 1), x2 = filled(M, 1, 2);
   Teko::MultiVector y1 = Thyra::createMembers(M->range(), 2);
@@ -87,7 +87,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, records_outputs_in_order) {
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, cap_and_clear) {
   Teko::ModifiableLinearOp M = diagonalOp(8);
-  Teko::KrylovSurrogateRecorderOp rec(M, 3);
+  Teko::KrylovSurrogate::RecorderOp rec(M, 3);
 
   Teko::MultiVector x = filled(M, 2, 3);
   Teko::MultiVector y = Thyra::createMembers(M->range(), 2);
@@ -108,7 +108,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, cap_and_clear) {
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, alpha_and_beta) {
   Teko::ModifiableLinearOp M = diagonalOp(10);
-  Teko::KrylovSurrogateRecorderOp rec(M, 4);
+  Teko::KrylovSurrogate::RecorderOp rec(M, 4);
 
   Teko::MultiVector x  = filled(M, 1, 5);
   Teko::MultiVector y  = filled(M, 1, 6);

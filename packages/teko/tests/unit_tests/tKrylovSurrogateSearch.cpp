@@ -19,7 +19,7 @@
 
 using Teko::KrylovSurrogate::DenseMatrix;
 using Teko::KrylovSurrogate::DenseVector;
-typedef Teko::KrylovSurrogateReport::Candidate Candidate;
+typedef Teko::KrylovSurrogate::Report::Candidate Candidate;
 
 namespace {
 
