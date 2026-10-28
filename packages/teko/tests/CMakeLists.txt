@@ -249,6 +249,50 @@ TRIBITS_ADD_EXECUTABLE_AND_TEST(
 )
 
 TRIBITS_ADD_EXECUTABLE_AND_TEST(
+  KrylovSurrogateSearch
+  SOURCES unit_tests/tKrylovSurrogateSearch.cpp ${UNIT_TEST_DRIVER}
+  COMM serial mpi
+  ARGS ${SERIAL_ARGS_STRING}
+  NUM_MPI_PROCS 1
+)
+
+TRIBITS_ADD_EXECUTABLE_AND_TEST(
+  KrylovSurrogateRecorderOp
+  SOURCES unit_tests/tKrylovSurrogateRecorderOp.cpp ${UNIT_TEST_DRIVER}
+  COMM serial mpi
+  ARGS ${SERIAL_ARGS_STRING}
+  NUM_MPI_PROCS 1
+)
+
+# The Krylov surrogate's parallel tests check bitwise rank invariance, so they
+# run at several rank counts (3 so candidates don't divide evenly)
+TRIBITS_ADD_EXECUTABLE(
+  KrylovSurrogateParallel
+  SOURCES unit_tests/tKrylovSurrogateParallel.cpp ${UNIT_TEST_DRIVER}
+  COMM serial mpi
+)
+TRIBITS_ADD_EXECUTABLE(
+  KrylovSurrogateReducedOperator
+  SOURCES unit_tests/tKrylovSurrogateReducedOperator.cpp ${UNIT_TEST_DRIVER}
+  COMM serial mpi
+)
+TRIBITS_ADD_EXECUTABLE(
+  KrylovSurrogateFactory
+  SOURCES unit_tests/tKrylovSurrogateFactory.cpp ${UNIT_TEST_DRIVER}
+  COMM serial mpi
+)
+FOREACH(NP 1 2 3 4)
+  TRIBITS_ADD_TEST(KrylovSurrogateParallel NAME_POSTFIX np${NP}
+    COMM serial mpi ARGS ${SERIAL_ARGS_STRING} NUM_MPI_PROCS ${NP})
+ENDFOREACH()
+FOREACH(NP 1 4)
+  TRIBITS_ADD_TEST(KrylovSurrogateReducedOperator NAME_POSTFIX np${NP}
+    COMM serial mpi ARGS ${SERIAL_ARGS_STRING} NUM_MPI_PROCS ${NP})
+  TRIBITS_ADD_TEST(KrylovSurrogateFactory NAME_POSTFIX np${NP}
+    COMM serial mpi ARGS ${SERIAL_ARGS_STRING} NUM_MPI_PROCS ${NP})
+ENDFOREACH()
+
+TRIBITS_ADD_EXECUTABLE_AND_TEST(
   ALOperator
   SOURCES unit_tests/tALOperator.cpp ${UNIT_TEST_DRIVER}
   COMM serial mpi
