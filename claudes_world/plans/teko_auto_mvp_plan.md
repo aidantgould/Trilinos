@@ -650,3 +650,45 @@ On it:
 **Scope of this run** (decided 2026-10-28): the build, the Trilinos unit tests, and the
 front-end end-to-end tests. None of 3.8's parity checks or measurements; those wait for
 a later run.
+
+## 7. As built (proto1, 2026-10-28)
+
+Built on `aidantgould/teko-auto-proto1` and the pyfront branch `teko-auto`, as planned
+except where noted. Nothing pushed.
+
+**Results.**
+
+- Teko's full suite, 25 tests including the 10 new ones, passes in
+  `trilinos-build-auto`. The 10 new ones: search, recorder, parallel at 1 to 4 ranks,
+  and reduced operator and factory at 1 and 4 ranks.
+- The reduced operator matches the dense reference to 3e-15 in every distribution
+  (even, a block entirely on one rank, a block smaller than the sample count), and
+  keeps the 10 directions above 1e-10 in the conditioning test where the Gram route
+  would keep 7.
+- End to end at 4 ranks: 8 FGMRES iterations gave 8 samples, ranks 8 8 8, diagonal
+  deviations up to 3e-14, rhs capture 0.998. The solution is bitwise unchanged by the
+  recorder. A warm start's recorded first input matches r0/||r0|| to 3e-17.
+- The handle reaches the factory through Stratimikos unchanged.
+- Front end: `test_teko_auto.py` passes all 16 checks at 1 and 4 ranks, and the demo
+  runs, including the new surrogate demo.
+
+**Differences from the plan.**
+
+- Two commits, library then tests, instead of one per step in 3.9.
+- `Teko_Config.h.in` gained `#cmakedefine Teko_ENABLE_Belos`: Belos is an optional
+  Teko dependency and the search needs it. Without Belos or TSQR, building the type
+  throws.
+- `KrylovSurrogateHandle::getRecorder()` was added, mainly so the warm-start test can
+  check the recorded first input.
+- A candidate counts as converged when the recomputed residual is at most 10 times
+  `Tolerance` (`kResidualSlack` in `Teko_KrylovSurrogateSearch.cpp`).
+- `buildReport()` throws if $\hat{b} = 0$, since there is then nothing to score.
+- Tests: the reduced-operator checks (dense reference, distributions, conditioning,
+  rank-0 SVD) got their own file, `tKrylovSurrogateReducedOperator.cpp`, sharing a
+  formula-defined problem in `tKrylovSurrogateProblem.hpp`. The "one timer per rank"
+  test was not written.
+- Neither fallback was needed: Belos accepted $K$ as a Thyra multivector operator
+  on the serial space, and `offsetViewNonConst` worked for computing into the
+  padded TSQR buffer.
+- Front end: the hack's `kResidualSlack = 1e3` check on the real solve was kept, now
+  local to `teko_ext.cpp`.
