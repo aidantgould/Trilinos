@@ -760,3 +760,95 @@ including a block held entirely by one rank.
   `selection-invertibility` describes.
 - Teuchos's `TEST_EQUALITY` cannot print a `std::vector`, so it fails to compile on
   one. Use `TEST_ASSERT(a == b)`.
+
+## 9. Full build: design options
+
+Written 2026-10-28, after proto1 and its simplification pass. None is decided. proto1's
+core is expected to survive the full build: recording at the preconditioner, TSQR with
+zero-row padding, the rank-0 SVD, Tpetra only, and round-robin dealing. What changes is
+how the feature fits into Teko. Each option below is marked **obvious win**,
+**recommended**, or **needs measuring/research**.
+
+### What should shift
+
+1. **Reconfigure at rebuild, not inside the solve** (recommended).
+   - Applications rebuild preconditioners anyway, at every Newton or time step, and
+     Teko's `"Adaptive"` factory already adapts its sub-block solvers to what it
+     observed.
+   - Flow: solve k records samples. At `rebuildInverse(A_{k+1})` the factory builds the
+     surrogate from those samples against the new matrix, picks a configuration,
+     builds it, and records again. This is valid because $\tilde{V}_j = A_{jj}Z_j$
+     is exact for any $Z$, including samples taken under the previous matrix.
+   - No Belos changes, and no re-solve hidden inside a solve. Rescuing a stalled solve
+     becomes the application's choice: rebuild, then solve again.
+   - The cost is semantic: the first solve of a sequence always runs the user's
+     baseline, and the benefit depends on how similar consecutive systems are.
+2. **Describe configurations in Teko's language.** Teko's
+   `"Hierarchical Block Gauss-Seidel"` is already the configuration space:
+   `"Hierarchical Block k"` sublists with `"Included Subblocks"` and a per-group
+   `"Inverse Type"`, swept in group order (`doc/guide/04-block-preconditioners.md`).
+   - *Reporting* candidates in that form, so the winner can be pasted into XML:
+     **obvious win**.
+   - *Applying* the winner by building that factory: recommended, but first check
+     how a merged group is solved. The hack assembled a merged matrix itself
+     (`Teko_KrylovReconfigPrec.hpp`). Either Hierarchical GS's inverse types accept a
+     blocked sub-operator, or a small "merged block" inverse factory is needed.
+3. **Score candidates with the same factory, on the surrogate** (needs measuring).
+   - Hold $\hat{\mathcal{C}}$ as a blocked Thyra operator of serial dense blocks, build
+     Hierarchical GS over it with Thyra's `DefaultSerialDenseLinearOpWithSolveFactory`
+     for merged groups, and run Belos FGMRES.
+   - One implementation of "configuration" then both scores and applies. It is also
+     the 3.5 performance-note upgrade: no explicit $K$, each group factored once.
+   - A small jittering dense inverse is where jitter comes back.
+   - Cost: Teko and Thyra setup per candidate, to be measured against the explicit-$K$
+     timings in 3.5.
+4. **Compressed sample store** (needs research).
+   - Fold new samples into each block's $\hat{Q}_j$, $Y_j$ as they arrive, with
+     rotate-then-truncate eviction (wiki `eviction-policy`).
+   - Memory drops from $m$ full vectors to $2R$, and samples can pool across a
+     sequence of solves.
+   - The recorder becomes thin, and the reduced-operator code splits into "update the
+     basis" and "assemble $\hat{\mathcal{C}}$".
+   - Whether eviction keeps search quality is a research question, not a coding one.
+5. **Candidate choice by design** (needs research).
+   - Uniform sampling of orderings wastes most of its budget at 6 or more blocks.
+     Guide merges by coupling strength from $\hat{\mathcal{C}}$ instead: strongly coupled
+     cycles must be merged (wiki `cyclic-coupling-spectrum`).
+   - Add a cost model; wiki `ordering-search-performance` has one, merged size to the
+     1.5 power.
+   - Once the factory acts (option 1), a pick rule is needed. The hack's 20%-of-range,
+     fewest-merges rule was a stand-in.
+
+### More in line with the rest of Trilinos
+
+6. **One namespace and one folder** (**obvious win**). Move to `src/KrylovSurrogate/`
+   with `Teko::KrylovSurrogate::{Handle, Report, Options, RecorderOp,
+   PreconditionerFactory}`, as `NS/` holds `Teko::NS::LSCPreconditionerFactory`. Today
+   some classes sit directly in `Teko::` and some in `Teko::KrylovSurrogate::`. The
+   cost is one added glob line in `src/CMakeLists.txt`.
+7. **Report through Teko's output** (**obvious win** for the printing part).
+   - A `"Print Report"` option writing a summary to `Teko::getOutputStream()`, the way
+     `"Diagnostic Inverse"` prints. Applications configured purely from XML get the
+     information without changing any code, closing the gap the handle leaves.
+   - Making the handle optional matters only once the factory acts on its own
+     (option 1).
+8. **Teuchos timers** (**obvious win**). Named `Teko Krylov Surrogate: ...` timers
+   in place of `std::chrono` plus a max-reduction, so the cost appears in the
+   application's timing summary, `StackedTimer` included.
+9. **Documentation the Teko way** (required for upstream). An entry in
+   `doc/guide/04-block-preconditioners.md`, an example under `packages/teko/examples`
+   beside `BuildPreconditioner`, and `claudes_world/` stripped before the PR.
+
+### Obvious wins
+
+These are cheap, change no numbers, and don't depend on any other decision, so they
+could go into proto1 as they stand:
+
+- reporting candidates as Hierarchical GS parameter lists (2, reporting only);
+- `src/KrylovSurrogate/` and one namespace (6);
+- `"Print Report"` (7, printing only);
+- Teuchos timers (8).
+
+Options 1 and 2 (applying) are the decisions that shape the rest of the full build.
+Option 3 should be prototyped and timed before either of them is built, because if its
+cost is acceptable it removes the second implementation of "configuration".
