@@ -104,8 +104,8 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, report_from_a_solve) {
   TEST_ASSERT(maxAbs(xs) == 0.0);
 
   Teko::KrylovSurrogateReport report = handle->buildReport();
-  out << "iterations " << itS << ", samples " << report.numSamples << ", ranks";
-  for (int r : report.ranks) out << " " << r;
+  out << "iterations " << itS << ", samples " << report.numSamples << ", basis sizes";
+  for (int r : report.basisSizes) out << " " << r;
   out << ", diagonal deviations";
   for (double d : report.diagonalDeviations) out << " " << d;
   out << ", rhs capture " << report.rhsCapture << "\n";
@@ -114,8 +114,8 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, report_from_a_solve) {
   TEST_ASSERT(report.numSamples >= 1);
   TEST_ASSERT(report.blockSizes == kSizes);
   for (int j = 0; j < 3; ++j) {
-    TEST_ASSERT(report.ranks[j] >= 1);
-    TEST_ASSERT(report.ranks[j] <= std::min(report.numSamples, kSizes[j]));
+    TEST_ASSERT(report.basisSizes[j] >= 1);
+    TEST_ASSERT(report.basisSizes[j] <= std::min(report.numSamples, kSizes[j]));
     TEST_ASSERT(report.diagonalDeviations[j] < 1e-6);
   }
   TEST_ASSERT(report.rhsCapture > 0.0 && report.rhsCapture <= 1.0 + 1e-12);
@@ -220,7 +220,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, errors) {
     ParameterList ifl = inverseLibraryList(Teko::KrylovSurrogateHandle::create());
     ifl.sublist("Surrogate").set("Maximum Sample", 10);
     auto invLib = Teko::InverseLibrary::buildFromParameterList(ifl);
-    TEST_THROW(invLib->getInverseFactory("Surrogate"), std::invalid_argument);
+    TEST_THROW(invLib->getInverseFactory("Surrogate"), Teuchos::Exceptions::InvalidParameter);
   }
   // a report before any build, and before any solve
   {

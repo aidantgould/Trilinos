@@ -9,14 +9,10 @@
 
 #include "Teko_KrylovSurrogatePreconditionerFactory.hpp"
 
-#include <set>
 #include <string>
 
 #include "Teuchos_Array.hpp"
 
-#include "TpetraCore_config.h"
-
-#include "Teko_Config.h"
 #include "Teko_InverseLibrary.hpp"
 #include "Teko_KrylovSurrogateRecorderOp.hpp"
 #include "Teko_KrylovSurrogateReducedOperator.hpp"
@@ -26,15 +22,31 @@ namespace Teko {
 
 namespace {
 
-// An unknown name is an error, so a misspelled option does not silently do nothing
-void checkNames(const Teuchos::ParameterList& pl, const std::set<std::string>& valid,
-                const std::string& where) {
-  for (auto it = pl.begin(); it != pl.end(); ++it) {
-    const std::string& name = pl.name(it);
-    TEUCHOS_TEST_FOR_EXCEPTION(
-        valid.count(name) == 0, std::invalid_argument,
-        "Teko \"Krylov Surrogate\": unknown parameter \"" << name << "\" in " << where);
-  }
+typedef Teuchos::RCP<KrylovSurrogateHandle> Handle;
+
+// Every option, with its default and documentation. Validating against this
+// makes an unknown or mistyped option an error, so a misspelling does not
+// silently do nothing.
+Teuchos::RCP<const Teuchos::ParameterList> validParameters() {
+  const KrylovSurrogateOptions defaults;
+  auto pl = Teuchos::rcp(new Teuchos::ParameterList);
+  pl->set("Type", std::string("Krylov Surrogate"), "Selects this preconditioner");
+  pl->set("Inverse Factory", std::string(""),
+          "The Teko block inverse applied, and recorded (required)");
+  pl->set("Report Handle", Handle(),
+          "The Teko::KrylovSurrogateHandle the report is retrieved from (required, set from code)");
+  pl->set("Maximum Samples", defaults.maxSamples,
+          "Columns of preconditioner output kept, each a full-length vector of memory");
+  pl->set("Truncation Tolerance", defaults.truncationTol,
+          "Singular values kept per block: sigma_k >= tolerance * sigma_1");
+  Teuchos::ParameterList& search = pl->sublist("Search", false, "Candidate scoring");
+  search.set("Tolerance", defaults.searchTol,
+             "Relative residual each candidate's surrogate solve stops at");
+  search.set("Candidate Count", defaults.candidateCount, "Number of candidates scored");
+  search.set("Seed", defaults.seed, "Seed for sampling candidates");
+  search.sublist("Orderings", false, "Orderings always scored, each an Array(int)")
+      .disableRecursiveValidation();
+  return pl;
 }
 
 }  // namespace
@@ -48,15 +60,13 @@ KrylovSurrogatePreconditionerFactory::KrylovSurrogatePreconditionerFactory(
 
 LinearOp KrylovSurrogatePreconditionerFactory::buildPreconditionerOperator(
     LinearOp& lo, PreconditionerState& state) const {
-#ifndef HAVE_TPETRA_TSQR
+#ifndef TEKO_HAVE_KRYLOV_SURROGATE
+  (void)lo;
+  (void)state;
   TEUCHOS_TEST_FOR_EXCEPTION(true, std::runtime_error,
                              "Teko \"Krylov Surrogate\" requires Tpetra configured with TSQR "
-                             "(Trilinos_ENABLE_TpetraTSQR=ON)");
-#endif
-#ifndef Teko_ENABLE_Belos
-  TEUCHOS_TEST_FOR_EXCEPTION(true, std::runtime_error,
-                             "Teko \"Krylov Surrogate\" requires Teko built with Belos");
-#endif
+                             "(Trilinos_ENABLE_TpetraTSQR=ON) and Teko built with Belos");
+#else
   TEUCHOS_TEST_FOR_EXCEPTION(invFactory_ == Teuchos::null, std::runtime_error,
                              "Teko \"Krylov Surrogate\": no \"Inverse Factory\" has been set");
   TEUCHOS_TEST_FOR_EXCEPTION(handle_ == Teuchos::null, std::runtime_error,
@@ -90,58 +100,46 @@ LinearOp KrylovSurrogatePreconditionerFactory::buildPreconditionerOperator(
 
   handle_->attach(recorder.getConst(), blo, options_);
   return recorderOp.getConst();
+#endif
 }
 
 void KrylovSurrogatePreconditionerFactory::initializeFromParameterList(
     const Teuchos::ParameterList& settings) {
-  typedef Teuchos::RCP<KrylovSurrogateHandle> Handle;
+  Teuchos::ParameterList pl(settings);
+  pl.validateParametersAndSetDefaults(*validParameters());
 
-  checkNames(settings,
-             {"Type", "Inverse Factory", "Report Handle", "Maximum Samples", "Truncation Tolerance",
-              "Search"},
-             "the \"Krylov Surrogate\" sublist");
-  TEUCHOS_TEST_FOR_EXCEPTION(not settings.isParameter("Inverse Factory"), std::runtime_error,
-                             "Parameter \"Inverse Factory\" is required by Teko \"Krylov "
-                             "Surrogate\"");
+  handle_ = pl.get<Handle>("Report Handle");
   TEUCHOS_TEST_FOR_EXCEPTION(
-      not settings.isType<Handle>("Report Handle"), std::runtime_error,
+      handle_ == Teuchos::null, std::runtime_error,
       "Teko \"Krylov Surrogate\" requires a \"Report Handle\", a "
       "Teuchos::RCP<Teko::KrylovSurrogateHandle> set from code. Without one the report could "
       "never be retrieved. See Teko::KrylovSurrogateHandle.");
+  const std::string invName = pl.get<std::string>("Inverse Factory");
+  TEUCHOS_TEST_FOR_EXCEPTION(invName.empty(), std::runtime_error,
+                             "Parameter \"Inverse Factory\" is required by Teko \"Krylov "
+                             "Surrogate\"");
 
-  handle_ = settings.get<Handle>("Report Handle");
-
-  options_ = KrylovSurrogateOptions();
-  if (settings.isParameter("Maximum Samples"))
-    options_.maxSamples = settings.get<int>("Maximum Samples");
-  if (settings.isParameter("Truncation Tolerance"))
-    options_.truncationTol = settings.get<double>("Truncation Tolerance");
+  options_.maxSamples    = pl.get<int>("Maximum Samples");
+  options_.truncationTol = pl.get<double>("Truncation Tolerance");
   TEUCHOS_TEST_FOR_EXCEPTION(options_.maxSamples < 1, std::invalid_argument,
                              "Teko \"Krylov Surrogate\": \"Maximum Samples\" must be at least 1");
 
-  if (settings.isSublist("Search")) {
-    const Teuchos::ParameterList& search = settings.sublist("Search");
-    checkNames(search, {"Tolerance", "Candidate Count", "Seed", "Orderings"},
-               "the \"Search\" sublist");
-    if (search.isParameter("Tolerance")) options_.searchTol = search.get<double>("Tolerance");
-    if (search.isParameter("Candidate Count"))
-      options_.candidateCount = search.get<int>("Candidate Count");
-    if (search.isParameter("Seed")) options_.seed = search.get<int>("Seed");
-    if (search.isSublist("Orderings")) {
-      const Teuchos::ParameterList& orderings = search.sublist("Orderings");
-      for (auto it = orderings.begin(); it != orderings.end(); ++it) {
-        const std::string& name = orderings.name(it);
-        TEUCHOS_TEST_FOR_EXCEPTION(
-            not orderings.isType<Teuchos::Array<int> >(name), std::invalid_argument,
-            "Teko \"Krylov Surrogate\": ordering \"" << name << "\" must be an Array(int)");
-        const Teuchos::Array<int>& o = orderings.get<Teuchos::Array<int> >(name);
-        options_.orderings.push_back(std::vector<int>(o.begin(), o.end()));
-      }
-    }
+  const Teuchos::ParameterList& search = pl.sublist("Search");
+  options_.searchTol                   = search.get<double>("Tolerance");
+  options_.candidateCount              = search.get<int>("Candidate Count");
+  options_.seed                        = search.get<int>("Seed");
+  options_.orderings.clear();
+  const Teuchos::ParameterList& orderings = search.sublist("Orderings");
+  for (auto it = orderings.begin(); it != orderings.end(); ++it) {
+    const std::string& name = orderings.name(it);
+    TEUCHOS_TEST_FOR_EXCEPTION(
+        not orderings.isType<Teuchos::Array<int> >(name), std::invalid_argument,
+        "Teko \"Krylov Surrogate\": ordering \"" << name << "\" must be an Array(int)");
+    const Teuchos::Array<int>& o = orderings.get<Teuchos::Array<int> >(name);
+    options_.orderings.push_back(std::vector<int>(o.begin(), o.end()));
   }
 
-  const std::string invName = settings.get<std::string>("Inverse Factory");
-  invFactory_               = getInverseLibrary()->getInverseFactory(invName);
+  invFactory_ = getInverseLibrary()->getInverseFactory(invName);
   TEUCHOS_TEST_FOR_EXCEPTION(invFactory_ == Teuchos::null, std::runtime_error,
                              "ERROR: \"Inverse Factory\" = " << invName << " could not be found");
 }

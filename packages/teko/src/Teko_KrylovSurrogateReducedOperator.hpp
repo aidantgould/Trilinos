@@ -25,6 +25,7 @@
 #include "Tpetra_Operator.hpp"
 
 #include "Teko_ConfigDefs.hpp"
+#include "Teko_KrylovSurrogateReport.hpp"
 #include "Teko_Utilities.hpp"
 
 namespace Teko {
@@ -35,10 +36,10 @@ typedef Teuchos::SerialDenseVector<int, double> DenseVector;
 
 /** \brief Truncated SVD \f$M \approx U \Sigma W^T\f$ of one block's small factor. */
 struct BlockReduction {
-  int rank = 0;
-  DenseMatrix U;  //!< k x rank
+  int size = 0;   //!< directions kept, \f$r_j\f$
+  DenseMatrix U;  //!< k x size
   std::vector<double> sigma;
-  DenseMatrix W;  //!< m x rank
+  DenseMatrix W;  //!< m x size
 };
 
 /** \brief SVD of a small dense \f$k \times m\f$ matrix on rank 0, truncated at
@@ -46,7 +47,8 @@ struct BlockReduction {
  *         and broadcast to every rank.
  *
  * Only rank 0's M is used. Running the SVD once and broadcasting it guarantees
- * every rank agrees on the rank, which a redundant SVD cannot.
+ * every rank agrees on how many directions to keep, which a redundant SVD
+ * cannot.
  */
 BlockReduction reduceOnRankZero(const DenseMatrix& M, double tol, const Teuchos::Comm<int>& comm);
 
@@ -57,17 +59,9 @@ BlockReduction reduceOnRankZero(const DenseMatrix& M, double tol, const Teuchos:
 Teuchos::RCP<const Tpetra::Operator<ST, LO, GO, NT> > tpetraBlock(const BlockedLinearOp& A, int i,
                                                                   int j);
 
-/** \brief \f$\hat{C}\f$, \f$\hat{b}\f$ and their diagnostics. */
-struct ReducedOperator {
-  std::vector<int> blockSizes;
-  std::vector<int> ranks;
-  DenseMatrix CHat;
-  DenseVector bHat;
-  double rhsCapture = 0.0;
-  std::vector<double> diagonalDeviations;
-};
-
-/** \brief Build \f$\hat{C}\f$ and \f$\hat{b}\f$ from preconditioner outputs.
+/** \brief Build \f$\hat{C}\f$ and \f$\hat{b}\f$ from preconditioner outputs, into
+ *         a report's numBlocks, blockSizes, basisSizes, CHat, bHat, rhsCapture and
+ *         diagonalDeviations.
  *
  * For each block j: \f$\tilde{V}_j = A_{jj} Z_j\f$, a tall-skinny QR
  * \f$\tilde{V}_j = Q_j R_j\f$ (padded with zero rows on any rank holding fewer
@@ -82,9 +76,10 @@ struct ReducedOperator {
  * \param[in] Z  m recorded preconditioner outputs, blocked like A's domain
  * \param[in] v1 the initial residual direction, one column, blocked like A's range
  * \param[in] truncationTol relative singular value cut
+ * \param[out] report the report whose surrogate fields are filled
  */
-ReducedOperator buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z,
-                                     const MultiVector& v1, double truncationTol);
+void buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z, const MultiVector& v1,
+                          double truncationTol, KrylovSurrogateReport& report);
 
 }  // namespace KrylovSurrogate
 }  // end namespace Teko

@@ -56,7 +56,7 @@ std::vector<std::vector<int> > buildCandidates(int n,
  *         order: block (i, j) is kept when block i's group comes at or after
  *         block j's, and zeroed otherwise.
  */
-DenseMatrix gaussSeidelSelection(const DenseMatrix& C, const std::vector<int>& ranks,
+DenseMatrix gaussSeidelSelection(const DenseMatrix& C, const std::vector<int>& basisSizes,
                                  const std::vector<int>& ordering);
 
 /** \brief Score every candidate on the surrogate and return them sorted:
@@ -68,7 +68,7 @@ DenseMatrix gaussSeidelSelection(const DenseMatrix& C, const std::vector<int>& r
  * bitwise identical on every rank. Collective.
  */
 std::vector<KrylovSurrogateReport::Candidate> scoreCandidates(
-    const DenseMatrix& C, const DenseVector& b, const std::vector<int>& ranks,
+    const DenseMatrix& C, const DenseVector& b, const std::vector<int>& basisSizes,
     const std::vector<std::vector<int> >& candidates, double tol, const Teuchos::Comm<int>& comm);
 
 }  // namespace KrylovSurrogate

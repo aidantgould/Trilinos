@@ -21,7 +21,7 @@
 #include "tKrylovSurrogateProblem.hpp"
 
 using namespace KrylovSurrogateTest;
-using Teko::KrylovSurrogate::ReducedOperator;
+typedef Teko::KrylovSurrogateReport Report;
 
 namespace {
 
@@ -34,7 +34,7 @@ double vEntry(int j, int r) { return std::cos(0.21 * r + j); }
 // The dense reference: V_j = A_jj Z_j, its truncated SVD U_j, Y_j = A_jj^{-1} U_j,
 // C_ij = U_i^T A_ij Y_j and b_j = U_j^T v_j
 struct Reference {
-  std::vector<int> ranks;
+  std::vector<int> basisSizes;
   Dense C;
   std::vector<double> b;
 };
@@ -60,7 +60,7 @@ Reference denseReference(const std::vector<int>& sizes, int m) {
                  &info);
     int r = 0;
     while (r < s && sigma[r] >= kTol * sigma[0]) ++r;
-    ref.ranks.push_back(r);
+    ref.basisSizes.push_back(r);
 
     U[j].shape(n, r);
     for (int c = 0; c < r; ++c)
@@ -73,39 +73,40 @@ Reference denseReference(const std::vector<int>& sizes, int m) {
 
   int R = 0;
   std::vector<int> off(nb + 1, 0);
-  for (int j = 0; j < nb; ++j) off[j + 1] = R += ref.ranks[j];
+  for (int j = 0; j < nb; ++j) off[j + 1] = R += ref.basisSizes[j];
   ref.C.shape(R, R);
   ref.b.assign(R, 0.0);
   for (int i = 0; i < nb; ++i) {
     for (int j = 0; j < nb; ++j) {
-      Dense Aij = denseBlock(sizes, i, j), AY(sizes[i], ref.ranks[j]),
-            Cij(ref.ranks[i], ref.ranks[j]);
+      Dense Aij = denseBlock(sizes, i, j), AY(sizes[i], ref.basisSizes[j]),
+            Cij(ref.basisSizes[i], ref.basisSizes[j]);
       AY.multiply(Teuchos::NO_TRANS, Teuchos::NO_TRANS, 1.0, Aij, Y[j], 0.0);
       Cij.multiply(Teuchos::TRANS, Teuchos::NO_TRANS, 1.0, U[i], AY, 0.0);
-      for (int a = 0; a < ref.ranks[i]; ++a)
-        for (int c = 0; c < ref.ranks[j]; ++c) ref.C(off[i] + a, off[j] + c) = Cij(a, c);
+      for (int a = 0; a < ref.basisSizes[i]; ++a)
+        for (int c = 0; c < ref.basisSizes[j]; ++c) ref.C(off[i] + a, off[j] + c) = Cij(a, c);
     }
-    for (int a = 0; a < ref.ranks[i]; ++a)
+    for (int a = 0; a < ref.basisSizes[i]; ++a)
       for (int r = 0; r < sizes[i]; ++r) ref.b[off[i] + a] += U[i](r, a) * vEntry(i, r);
   }
   return ref;
 }
 
-ReducedOperator build(const std::vector<int>& sizes, const std::vector<Distribution>& d, int m) {
+Report build(const std::vector<int>& sizes, const std::vector<Distribution>& d, int m) {
   Teko::BlockedLinearOp A = buildBlockedOp(sizes, d);
   Teko::MultiVector Z     = Thyra::createMembers(A->domain(), m);
   Teko::MultiVector v1    = Thyra::createMembers(A->range(), 1);
   fillBlocked(Z, [](int j, int r, int c) { return zEntry(j, r, c); });
   fillBlocked(v1, [](int j, int r, int) { return vEntry(j, r); });
-  return Teko::KrylovSurrogate::buildReducedOperator(A, Z, v1, kTol);
+  Report report;
+  Teko::KrylovSurrogate::buildReducedOperator(A, Z, v1, kTol, report);
+  return report;
 }
 
 // Each basis vector is determined up to sign, so C_hat matches the reference
 // entry by entry in magnitude
-void compare(const ReducedOperator& red, const Reference& ref, Teuchos::FancyOStream& out,
-             bool& success) {
-  TEST_ASSERT(red.ranks == ref.ranks);
-  if (red.ranks != ref.ranks) return;
+void compare(const Report& red, const Reference& ref, Teuchos::FancyOStream& out, bool& success) {
+  TEST_ASSERT(red.basisSizes == ref.basisSizes);
+  if (red.basisSizes != ref.basisSizes) return;
   const int R  = ref.C.numRows();
   double scale = 0.0, worst = 0.0, worstB = 0.0;
   for (int i = 0; i < R; ++i)
@@ -126,11 +127,11 @@ void compare(const ReducedOperator& red, const Reference& ref, Teuchos::FancyOSt
 TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, matches_dense_reference) {
   // the last block has fewer rows than samples
   std::vector<int> sizes = {60, 48, 8};
-  ReducedOperator red    = build(sizes, {EVEN, EVEN, EVEN}, kSamples);
+  Report red             = build(sizes, {EVEN, EVEN, EVEN}, kSamples);
   Reference ref          = denseReference(sizes, kSamples);
   compare(red, ref, out, success);
 
-  TEST_ASSERT(red.ranks[2] <= sizes[2]);
+  TEST_ASSERT(red.basisSizes[2] <= sizes[2]);
   TEST_ASSERT(red.rhsCapture > 0.0 && red.rhsCapture <= 1.0 + 1e-12);
   TEST_ASSERT(red.blockSizes == sizes);
 }
@@ -174,8 +175,9 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, resolves_below_gram_floor) {
   });
   fillBlocked(v1, [](int, int r, int) { return 1.0 + 0.1 * r; });
 
-  ReducedOperator red = Teko::KrylovSurrogate::buildReducedOperator(A, Z, v1, kTol);
-  TEST_EQUALITY(red.ranks[0], 10);
+  Report red;
+  Teko::KrylovSurrogate::buildReducedOperator(A, Z, v1, kTol, red);
+  TEST_EQUALITY(red.basisSizes[0], 10);
 }
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, rank_zero_svd) {
@@ -185,7 +187,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, rank_zero_svd) {
   M(1, 1)  = 2.0;
   M(2, 2)  = 1e-12;
   auto red = Teko::KrylovSurrogate::reduceOnRankZero(M, 1e-10, *comm);
-  TEST_EQUALITY(red.rank, 2);
+  TEST_EQUALITY(red.size, 2);
   TEST_FLOATING_EQUALITY(red.sigma[0], 3.0, 1e-14);
   TEST_FLOATING_EQUALITY(red.sigma[1], 2.0, 1e-14);
   TEST_EQUALITY(red.U.numRows(), 3);

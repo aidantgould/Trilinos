@@ -26,9 +26,9 @@ typedef Teko::KrylovSurrogateReport::Candidate Candidate;
 
 namespace {
 
-void buildSurrogate(DenseMatrix& C, DenseVector& b, std::vector<int>& ranks) {
-  ranks = {3, 2, 3, 2};
-  int R = 10;
+void buildSurrogate(DenseMatrix& C, DenseVector& b, std::vector<int>& basisSizes) {
+  basisSizes = {3, 2, 3, 2};
+  int R      = 10;
   C.shape(R, R);
   b.size(R);
   std::vector<int> block = {0, 0, 0, 1, 1, 2, 2, 2, 3, 3};
@@ -60,15 +60,17 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateParallel, bitwise_identical_to_serial) {
   auto comm = Tpetra::getDefaultComm();
   DenseMatrix C;
   DenseVector b;
-  std::vector<int> ranks;
-  buildSurrogate(C, b, ranks);
+  std::vector<int> basisSizes;
+  buildSurrogate(C, b, basisSizes);
 
   // 75 candidates: every ordering of 4 blocks, dealt unevenly over 3 ranks
   auto candidates = Teko::KrylovSurrogate::allConfigurations(4);
-  auto parallel   = Teko::KrylovSurrogate::scoreCandidates(C, b, ranks, candidates, 1e-10, *comm);
+  auto parallel =
+      Teko::KrylovSurrogate::scoreCandidates(C, b, basisSizes, candidates, 1e-10, *comm);
 
   Teuchos::SerialComm<int> serialComm;
-  auto serial = Teko::KrylovSurrogate::scoreCandidates(C, b, ranks, candidates, 1e-10, serialComm);
+  auto serial =
+      Teko::KrylovSurrogate::scoreCandidates(C, b, basisSizes, candidates, 1e-10, serialComm);
 
   TEST_EQUALITY(parallel.size(), candidates.size());
   TEST_ASSERT(sameCandidates(parallel, serial));
@@ -82,13 +84,13 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateParallel, more_ranks_than_candidates) {
   auto comm = Tpetra::getDefaultComm();
   DenseMatrix C;
   DenseVector b;
-  std::vector<int> ranks;
-  buildSurrogate(C, b, ranks);
+  std::vector<int> basisSizes;
+  buildSurrogate(C, b, basisSizes);
 
   std::vector<std::vector<int> > two = {{0, 1, 2, 3}, {0, 0, 0, 0}};
-  auto parallel = Teko::KrylovSurrogate::scoreCandidates(C, b, ranks, two, 1e-10, *comm);
+  auto parallel = Teko::KrylovSurrogate::scoreCandidates(C, b, basisSizes, two, 1e-10, *comm);
   Teuchos::SerialComm<int> serialComm;
-  auto serial = Teko::KrylovSurrogate::scoreCandidates(C, b, ranks, two, 1e-10, serialComm);
+  auto serial = Teko::KrylovSurrogate::scoreCandidates(C, b, basisSizes, two, 1e-10, serialComm);
 
   TEST_EQUALITY(parallel.size(), 2u);
   TEST_ASSERT(sameCandidates(parallel, serial));

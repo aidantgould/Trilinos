@@ -24,9 +24,9 @@ typedef Teko::KrylovSurrogateReport::Candidate Candidate;
 namespace {
 
 // C_hat with identity diagonal blocks and the given off-diagonal value pattern
-DenseMatrix identityBlocks(const std::vector<int>& ranks) {
+DenseMatrix identityBlocks(const std::vector<int>& basisSizes) {
   int R = 0;
-  for (int r : ranks) R += r;
+  for (int r : basisSizes) R += r;
   DenseMatrix C(R, R);
   for (int i = 0; i < R; ++i) C(i, i) = 1.0;
   return C;
@@ -38,10 +38,10 @@ DenseVector onesVector(int R) {
   return b;
 }
 
-Candidate scoreOne(const DenseMatrix& C, const DenseVector& b, const std::vector<int>& ranks,
+Candidate scoreOne(const DenseMatrix& C, const DenseVector& b, const std::vector<int>& basisSizes,
                    const std::vector<int>& ordering) {
   Teuchos::SerialComm<int> comm;
-  return Teko::KrylovSurrogate::scoreCandidates(C, b, ranks, {ordering}, 1e-10, comm)[0];
+  return Teko::KrylovSurrogate::scoreCandidates(C, b, basisSizes, {ordering}, 1e-10, comm)[0];
 }
 
 }  // namespace
@@ -88,22 +88,22 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, candidates_sampled_reproducibly) {
 }
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, all_merged_is_exact) {
-  std::vector<int> ranks = {3, 2, 4};
-  DenseMatrix C          = identityBlocks(ranks);
+  std::vector<int> basisSizes = {3, 2, 4};
+  DenseMatrix C               = identityBlocks(basisSizes);
   for (int i = 0; i < 9; ++i)
     for (int j = 0; j < 9; ++j)
       if (C(i, j) == 0.0) C(i, j) = 0.05 * std::sin(1.0 + i + 3.0 * j);
 
-  Candidate c = scoreOne(C, onesVector(9), ranks, {0, 0, 0});
+  Candidate c = scoreOne(C, onesVector(9), basisSizes, {0, 0, 0});
   TEST_EQUALITY(c.status, "converged");
   TEST_EQUALITY(c.iterations, 1);
 }
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, block_diagonal_needs_one_iteration) {
-  std::vector<int> ranks = {2, 3, 2};
-  DenseMatrix C          = identityBlocks(ranks);
+  std::vector<int> basisSizes = {2, 3, 2};
+  DenseMatrix C               = identityBlocks(basisSizes);
   for (const auto& o : Teko::KrylovSurrogate::allConfigurations(3)) {
-    Candidate c = scoreOne(C, onesVector(7), ranks, o);
+    Candidate c = scoreOne(C, onesVector(7), basisSizes, o);
     TEST_EQUALITY(c.status, "converged");
     TEST_EQUALITY(c.iterations, 1);
   }
@@ -112,23 +112,23 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, block_diagonal_needs_one_iteration) {
 TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, lower_coupling_and_its_reverse) {
   // C = [I 0; L I]. The identity ordering keeps L, so K = I. Reversed, L is
   // dropped, K = C, and K - I is nilpotent: exactly two iterations.
-  std::vector<int> ranks = {2, 2};
-  DenseMatrix C          = identityBlocks(ranks);
-  C(2, 0)                = 0.7;
-  C(2, 1)                = -0.3;
-  C(3, 0)                = 0.2;
-  C(3, 1)                = 0.9;
-  DenseVector b          = onesVector(4);
+  std::vector<int> basisSizes = {2, 2};
+  DenseMatrix C               = identityBlocks(basisSizes);
+  C(2, 0)                     = 0.7;
+  C(2, 1)                     = -0.3;
+  C(3, 0)                     = 0.2;
+  C(3, 1)                     = 0.9;
+  DenseVector b               = onesVector(4);
 
-  Candidate keep = scoreOne(C, b, ranks, {0, 1});
+  Candidate keep = scoreOne(C, b, basisSizes, {0, 1});
   TEST_EQUALITY(keep.status, "converged");
   TEST_EQUALITY(keep.iterations, 1);
 
-  Candidate drop = scoreOne(C, b, ranks, {1, 0});
+  Candidate drop = scoreOne(C, b, basisSizes, {1, 0});
   TEST_EQUALITY(drop.status, "converged");
   TEST_EQUALITY(drop.iterations, 2);
 
-  DenseMatrix S = Teko::KrylovSurrogate::gaussSeidelSelection(C, ranks, {1, 0});
+  DenseMatrix S = Teko::KrylovSurrogate::gaussSeidelSelection(C, basisSizes, {1, 0});
   TEST_EQUALITY(S(2, 0), 0.0);
   TEST_EQUALITY(S(0, 0), 1.0);
 }
@@ -136,23 +136,23 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, lower_coupling_and_its_reverse) {
 TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, singular_merged_group) {
   // C = [1 1 0; 1 1 1; 0 1 1] is nonsingular, but merging blocks 0 and 1
   // gives the singular group block [1 1; 1 1]
-  std::vector<int> ranks = {1, 1, 1};
-  DenseMatrix C          = identityBlocks(ranks);
-  C(0, 1)                = 1.0;
-  C(1, 0)                = 1.0;
-  C(1, 2)                = 1.0;
-  C(2, 1)                = 1.0;
+  std::vector<int> basisSizes = {1, 1, 1};
+  DenseMatrix C               = identityBlocks(basisSizes);
+  C(0, 1)                     = 1.0;
+  C(1, 0)                     = 1.0;
+  C(1, 2)                     = 1.0;
+  C(2, 1)                     = 1.0;
 
-  Candidate c = scoreOne(C, onesVector(3), ranks, {0, 0, 1});
+  Candidate c = scoreOne(C, onesVector(3), basisSizes, {0, 0, 1});
   TEST_EQUALITY(c.status, "singular group block");
 
-  Candidate gs = scoreOne(C, onesVector(3), ranks, {0, 1, 2});
+  Candidate gs = scoreOne(C, onesVector(3), basisSizes, {0, 1, 2});
   TEST_EQUALITY(gs.status, "converged");
 }
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, sorted_and_complete) {
-  std::vector<int> ranks = {2, 2, 2};
-  DenseMatrix C          = identityBlocks(ranks);
+  std::vector<int> basisSizes = {2, 2, 2};
+  DenseMatrix C               = identityBlocks(basisSizes);
   for (int i = 0; i < 6; ++i)
     for (int j = 0; j < 6; ++j)
       if (i / 2 != j / 2) C(i, j) = 0.3 * std::cos(2.0 * i - j);
@@ -160,7 +160,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, sorted_and_complete) {
   Teuchos::SerialComm<int> comm;
   auto candidates = Teko::KrylovSurrogate::allConfigurations(3);
   auto scored =
-      Teko::KrylovSurrogate::scoreCandidates(C, onesVector(6), ranks, candidates, 1e-10, comm);
+      Teko::KrylovSurrogate::scoreCandidates(C, onesVector(6), basisSizes, candidates, 1e-10, comm);
   TEST_EQUALITY(scored.size(), candidates.size());
   for (std::size_t i = 1; i < scored.size(); ++i) {
     if (scored[i].status == scored[i - 1].status)

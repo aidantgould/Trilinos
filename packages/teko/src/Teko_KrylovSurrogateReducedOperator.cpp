@@ -9,6 +9,8 @@
 
 #include "Teko_KrylovSurrogateReducedOperator.hpp"
 
+#ifdef TEKO_HAVE_KRYLOV_SURROGATE
+
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -19,12 +21,9 @@
 #include "Thyra_TpetraLinearOp.hpp"
 #include "Thyra_TpetraThyraWrappers.hpp"
 
-#include "TpetraCore_config.h"
 #include "Tpetra_Map.hpp"
 #include "Tpetra_MultiVector.hpp"
-#ifdef HAVE_TPETRA_TSQR
 #include "Tpetra_TsqrAdaptor.hpp"
-#endif
 
 namespace Teko {
 namespace KrylovSurrogate {
@@ -34,6 +33,7 @@ namespace {
 typedef Tpetra::Map<LO, GO, NT> TpetraMap;
 typedef Tpetra::MultiVector<ST, LO, GO, NT> TpetraMV;
 typedef Thyra::TpetraOperatorVectorExtraction<ST, LO, GO, NT> TOE;
+typedef Teuchos::RCP<const Tpetra::Operator<ST, LO, GO, NT> > TpetraOp;
 
 // A k x n dense matrix as a Tpetra multivector, locally replicated: the small
 // right-hand factor of a local GEMM, or the result of a reduction.
@@ -89,13 +89,13 @@ BlockReduction reduceOnRankZero(const DenseMatrix& M, double tol, const Teuchos:
         info != 0, std::runtime_error,
         "Teko::KrylovSurrogate::reduceOnRankZero: GESVD failed, info = " << info);
 
-    red.rank = 0;
-    while (red.rank < s && sigma[red.rank] >= tol * sigma[0] && sigma[red.rank] > 0.0) ++red.rank;
-    red.rank = std::max(red.rank, 1);
+    red.size = 0;
+    while (red.size < s && sigma[red.size] >= tol * sigma[0] && sigma[red.size] > 0.0) ++red.size;
+    red.size = std::max(red.size, 1);
   }
 
-  Teuchos::broadcast<int, int>(comm, 0, 1, &red.rank);
-  const int r = red.rank;
+  Teuchos::broadcast<int, int>(comm, 0, 1, &red.size);
+  const int r = red.size;
 
   red.sigma.assign(r, 0.0);
   red.U.shape(k, r);
@@ -131,30 +131,26 @@ Teuchos::RCP<const Tpetra::Operator<ST, LO, GO, NT> > tpetraBlock(const BlockedL
   return tpetraOp->getConstTpetraOperator();
 }
 
-ReducedOperator buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z,
-                                     const MultiVector& v1, double truncationTol) {
-#ifndef HAVE_TPETRA_TSQR
-  (void)A;
-  (void)Z;
-  (void)v1;
-  (void)truncationTol;
-  TEUCHOS_TEST_FOR_EXCEPTION(true, std::runtime_error,
-                             "Teko \"Krylov Surrogate\" requires Tpetra configured with TSQR "
-                             "(Trilinos_ENABLE_TpetraTSQR=ON)");
-#else
+void buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z, const MultiVector& v1,
+                          double truncationTol, KrylovSurrogateReport& out) {
   const int nb = blockRowCount(A);
   const int m  = static_cast<int>(Z->domain()->dim());
 
-  ReducedOperator out;
+  out.numBlocks = nb;
   out.blockSizes.resize(nb);
-  out.ranks.resize(nb);
+  out.basisSizes.resize(nb);
   out.diagonalDeviations.resize(nb);
+
+  // every block as a Tpetra operator, null for a zero block, fetched once
+  std::vector<std::vector<TpetraOp> > blocks(nb, std::vector<TpetraOp>(nb));
+  for (int i = 0; i < nb; ++i)
+    for (int j = 0; j < nb; ++j) blocks[i][j] = tpetraBlock(A, i, j);
 
   std::vector<Teuchos::RCP<TpetraMV> > Qhat(nb), Y(nb);
   Teuchos::RCP<const Teuchos::Comm<int> > comm;
 
   for (int j = 0; j < nb; ++j) {
-    auto Ajj = tpetraBlock(A, j, j);
+    const TpetraOp& Ajj = blocks[j][j];
     TEUCHOS_TEST_FOR_EXCEPTION(Ajj == Teuchos::null, std::runtime_error,
                                "Teko \"Krylov Surrogate\": diagonal block "
                                    << j << " is zero, so the surrogate is undefined");
@@ -179,8 +175,8 @@ ReducedOperator buildReducedOperator(const BlockedLinearOp& A, const MultiVector
     tsqr.factorExplicit(work, Q, R);
 
     BlockReduction red = reduceOnRankZero(R, truncationTol, *comm);
-    const int r        = red.rank;
-    out.ranks[j]       = r;
+    const int r        = red.size;
+    out.basisSizes[j]  = r;
 
     // Q_hat_j = Q_j U_j, keeping only the block's own rows
     TpetraMV QU(workMap, r);
@@ -196,7 +192,7 @@ ReducedOperator buildReducedOperator(const BlockedLinearOp& A, const MultiVector
   }
 
   std::vector<int> offset(nb + 1, 0);
-  for (int j = 0; j < nb; ++j) offset[j + 1] = offset[j] + out.ranks[j];
+  for (int j = 0; j < nb; ++j) offset[j + 1] = offset[j] + out.basisSizes[j];
   const int R = offset[nb];
 
   // C_hat_ij = Q_hat_i^T A_ij Y_j. The diagonal blocks are computed by the same
@@ -205,16 +201,15 @@ ReducedOperator buildReducedOperator(const BlockedLinearOp& A, const MultiVector
   out.CHat.shape(R, R);
   for (int i = 0; i < nb; ++i) {
     for (int j = 0; j < nb; ++j) {
-      auto Aij = tpetraBlock(A, i, j);
-      if (Aij == Teuchos::null) continue;
+      if (blocks[i][j] == Teuchos::null) continue;
 
-      TpetraMV AY(Aij->getRangeMap(), out.ranks[j]);
-      Aij->apply(*Y[j], AY);
+      TpetraMV AY(blocks[i][j]->getRangeMap(), out.basisSizes[j]);
+      blocks[i][j]->apply(*Y[j], AY);
       DenseMatrix Cij = transposeProduct(*Qhat[i], AY);
 
       double deviation = 0.0;
-      for (int c = 0; c < out.ranks[j]; ++c) {
-        for (int rr = 0; rr < out.ranks[i]; ++rr) {
+      for (int c = 0; c < out.basisSizes[j]; ++c) {
+        for (int rr = 0; rr < out.basisSizes[i]; ++rr) {
           if (i == j) {
             deviation  = std::max(deviation, std::abs(Cij(rr, c) - (rr == c ? 1.0 : 0.0)));
             Cij(rr, c) = (rr == c ? 1.0 : 0.0);
@@ -232,7 +227,7 @@ ReducedOperator buildReducedOperator(const BlockedLinearOp& A, const MultiVector
   for (int j = 0; j < nb; ++j) {
     auto v1j       = tpetraOfBlock(v1, j);
     DenseMatrix bj = transposeProduct(*Qhat[j], *v1j);
-    for (int rr = 0; rr < out.ranks[j]; ++rr) out.bHat(offset[j] + rr) = bj(rr, 0);
+    for (int rr = 0; rr < out.basisSizes[j]; ++rr) out.bHat(offset[j] + rr) = bj(rr, 0);
 
     Teuchos::Array<double> norm(1);
     v1j->norm2(norm());
@@ -246,10 +241,9 @@ ReducedOperator buildReducedOperator(const BlockedLinearOp& A, const MultiVector
   Teuchos::broadcast<int, double>(*comm, 0, R, out.bHat.values());
   Teuchos::broadcast<int, double>(*comm, 0, nb, out.diagonalDeviations.data());
   Teuchos::broadcast<int, double>(*comm, 0, 1, &out.rhsCapture);
-
-  return out;
-#endif
 }
 
 }  // namespace KrylovSurrogate
 }  // end namespace Teko
+
+#endif  // TEKO_HAVE_KRYLOV_SURROGATE

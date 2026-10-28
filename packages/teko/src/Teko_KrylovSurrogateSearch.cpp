@@ -15,30 +15,23 @@
 #include <numeric>
 #include <set>
 
+#ifdef TEKO_HAVE_KRYLOV_SURROGATE
+
 #include "Teuchos_CommHelpers.hpp"
-#include "Teuchos_LAPACK.hpp"
+#include "Teuchos_SerialDenseSolver.hpp"
 #include "Teuchos_oblackholestream.hpp"
 
-#include "Teko_Config.h"
-
-#ifdef Teko_ENABLE_Belos
 #include "BelosBlockGmresSolMgr.hpp"
 #include "BelosLinearProblem.hpp"
 #include "BelosThyraAdapter.hpp"
 #include "Thyra_DefaultSpmdVectorSpace.hpp"
 #include "Thyra_DetachedMultiVectorView.hpp"
 #include "Thyra_MultiVectorStdOps.hpp"
-#endif
 
 namespace Teko {
 namespace KrylovSurrogate {
 
 namespace {
-
-// Unpreconditioned GMRES on a small dense matrix tracks its true residual to
-// roundoff; the slack only absorbs that when the recomputed residual decides
-// whether a candidate converged.
-constexpr double kResidualSlack = 10.0;
 
 enum Status { CONVERGED = 0, MAX_ITERATIONS = 1, SINGULAR = 2, SOLVER_ERROR = 3 };
 
@@ -76,7 +69,6 @@ struct Scored {
   double rate                  = std::numeric_limits<double>::quiet_NaN();
 };
 
-#ifdef Teko_ENABLE_Belos
 typedef Thyra::MultiVectorBase<double> ThyraMV;
 typedef Thyra::LinearOpBase<double> ThyraOp;
 
@@ -84,14 +76,14 @@ typedef Thyra::LinearOpBase<double> ThyraOp;
 // solver manager so its timers are registered once.
 class Scorer {
  public:
-  Scorer(const DenseMatrix& C, const DenseVector& b, const std::vector<int>& ranks, double tol)
-      : C_(C), b_(b), ranks_(ranks), tol_(tol), R_(C.numRows()) {
+  Scorer(const DenseMatrix& C, const DenseVector& b, const std::vector<int>& basisSizes, double tol)
+      : C_(C), basisSizes_(basisSizes), R_(C.numRows()) {
     space_ = Thyra::defaultSpmdVectorSpace<double>(R_);
 
     auto params = Teuchos::rcp(new Teuchos::ParameterList);
     params->set("Num Blocks", R_);
     params->set("Maximum Iterations", R_);
-    params->set("Convergence Tolerance", tol_);
+    params->set("Convergence Tolerance", tol);
     params->set("Verbosity", static_cast<int>(Belos::Errors));
     params->set("Output Stream",
                 Teuchos::RCP<std::ostream>(Teuchos::rcp(new Teuchos::oblackholestream)));
@@ -102,30 +94,19 @@ class Scorer {
     bThyra_ = Thyra::createMembers(space_, 1);
     {
       Thyra::DetachedMultiVectorView<double> view(bThyra_);
-      for (int i = 0; i < R_; ++i) view(i, 0) = b_(i);
+      for (int i = 0; i < R_; ++i) view(i, 0) = b(i);
     }
   }
 
   Scored score(const std::vector<int>& ordering) {
     Scored s;
     try {
-      // [C]_S1^{-1} by LU factor and inverse
-      DenseMatrix S = gaussSeidelSelection(C_, ranks_, ordering);
-      Teuchos::LAPACK<int, double> lapack;
-      std::vector<int> pivots(R_);
-      int info = 0;
-      lapack.GETRF(R_, R_, S.values(), S.stride(), pivots.data(), &info);
-      if (info > 0) {
-        s.status = SINGULAR;
-        return s;
-      }
-      int lwork = -1;
-      double query;
-      lapack.GETRI(R_, S.values(), S.stride(), pivots.data(), &query, lwork, &info);
-      lwork = static_cast<int>(query);
-      std::vector<double> work(lwork);
-      lapack.GETRI(R_, S.values(), S.stride(), pivots.data(), work.data(), lwork, &info);
-      if (info > 0) {
+      // [C]_S1^{-1}, in place. It is singular exactly when a merged group's
+      // block is, since singleton groups' blocks are I.
+      DenseMatrix S = gaussSeidelSelection(C_, basisSizes_, ordering);
+      Teuchos::SerialDenseSolver<int, double> inverse;
+      inverse.setMatrix(Teuchos::rcpFromRef(S));
+      if (inverse.invert() != 0) {
         s.status = SINGULAR;
         return s;
       }
@@ -146,19 +127,14 @@ class Scorer {
           new Belos::LinearProblem<double, ThyraMV, ThyraOp>(Kop, y, bThyra_.getConst()));
       problem->setProblem();
       solver_->setProblem(problem);
-      solver_->solve();
-      s.iterations = solver_->getNumIters();
 
-      // The status comes from the recomputed residual, never Belos's estimate
-      DenseVector yv(R_), r(b_);
-      {
-        Thyra::ConstDetachedMultiVectorView<double> view(y);
-        for (int i = 0; i < R_; ++i) yv(i) = view(i, 0);
-      }
-      r.multiply(Teuchos::NO_TRANS, Teuchos::NO_TRANS, -1.0, K, yv, 1.0);
-      s.finalRelativeResidual = r.normFrobenius() / b_.normFrobenius();
-      s.status = (s.finalRelativeResidual <= kResidualSlack * tol_) ? CONVERGED : MAX_ITERATIONS;
-      s.rate   = s.iterations > 0 ? std::pow(s.finalRelativeResidual, 1.0 / s.iterations) : 0.0;
+      // Belos's own verdict and residual are reliable here: the GMRES is
+      // unpreconditioned on a fixed matrix, unlike the flexible solve the
+      // surrogate came from.
+      s.status                = solver_->solve() == Belos::Converged ? CONVERGED : MAX_ITERATIONS;
+      s.iterations            = solver_->getNumIters();
+      s.finalRelativeResidual = solver_->achievedTol();
+      s.rate = s.iterations > 0 ? std::pow(s.finalRelativeResidual, 1.0 / s.iterations) : 0.0;
     } catch (const std::exception&) {
       s = Scored();
     }
@@ -167,16 +143,13 @@ class Scorer {
 
  private:
   const DenseMatrix& C_;
-  const DenseVector& b_;
-  const std::vector<int>& ranks_;
-  double tol_;
+  const std::vector<int>& basisSizes_;
   int R_;
 
   Teuchos::RCP<const Thyra::VectorSpaceBase<double> > space_;
   Teuchos::RCP<Belos::BlockGmresSolMgr<double, ThyraMV, ThyraOp> > solver_;
   Teuchos::RCP<ThyraMV> bThyra_;
 };
-#endif
 
 }  // namespace
 
@@ -275,11 +248,11 @@ std::vector<std::vector<int> > buildCandidates(int n,
   return out;
 }
 
-DenseMatrix gaussSeidelSelection(const DenseMatrix& C, const std::vector<int>& ranks,
+DenseMatrix gaussSeidelSelection(const DenseMatrix& C, const std::vector<int>& basisSizes,
                                  const std::vector<int>& ordering) {
-  const int nb = static_cast<int>(ranks.size());
+  const int nb = static_cast<int>(basisSizes.size());
   std::vector<int> offset(nb + 1, 0);
-  for (int j = 0; j < nb; ++j) offset[j + 1] = offset[j] + ranks[j];
+  for (int j = 0; j < nb; ++j) offset[j + 1] = offset[j] + basisSizes[j];
 
   DenseMatrix S(C);
   for (int i = 0; i < nb; ++i)
@@ -291,18 +264,8 @@ DenseMatrix gaussSeidelSelection(const DenseMatrix& C, const std::vector<int>& r
 }
 
 std::vector<KrylovSurrogateReport::Candidate> scoreCandidates(
-    const DenseMatrix& C, const DenseVector& b, const std::vector<int>& ranks,
+    const DenseMatrix& C, const DenseVector& b, const std::vector<int>& basisSizes,
     const std::vector<std::vector<int> >& candidates, double tol, const Teuchos::Comm<int>& comm) {
-#ifndef Teko_ENABLE_Belos
-  (void)C;
-  (void)b;
-  (void)ranks;
-  (void)candidates;
-  (void)tol;
-  (void)comm;
-  TEUCHOS_TEST_FOR_EXCEPTION(true, std::runtime_error,
-                             "Teko \"Krylov Surrogate\" requires Teko built with Belos");
-#else
   TEUCHOS_TEST_FOR_EXCEPTION(b.normFrobenius() == 0.0, std::runtime_error,
                              "Teko \"Krylov Surrogate\": the initial residual has no component in "
                              "the trained subspace, so there is nothing to score");
@@ -313,7 +276,7 @@ std::vector<KrylovSurrogateReport::Candidate> scoreCandidates(
   const int rank  = comm.getRank();
   const int nproc = comm.getSize();
   std::vector<double> mine(4 * nc, 0.0), all(4 * nc, 0.0);
-  Scorer scorer(C, b, ranks, tol);
+  Scorer scorer(C, b, basisSizes, tol);
   for (int i = rank; i < nc; i += nproc) {
     Scored s        = scorer.score(candidates[i]);
     mine[4 * i + 0] = s.status;
@@ -345,8 +308,9 @@ std::vector<KrylovSurrogateReport::Candidate> scoreCandidates(
   std::vector<KrylovSurrogateReport::Candidate> sorted;
   for (int i : order) sorted.push_back(out[i]);
   return sorted;
-#endif
 }
 
 }  // namespace KrylovSurrogate
 }  // end namespace Teko
+
+#endif  // TEKO_HAVE_KRYLOV_SURROGATE

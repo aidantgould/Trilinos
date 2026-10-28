@@ -10,7 +10,6 @@
 #include "Teko_KrylovSurrogateReport.hpp"
 
 #include <chrono>
-#include <ostream>
 
 #include "Teuchos_Array.hpp"
 #include "Teuchos_CommHelpers.hpp"
@@ -29,7 +28,7 @@ Teuchos::RCP<Teuchos::ParameterList> KrylovSurrogateReport::toParameterList() co
   pl->set("Number of Blocks", numBlocks);
   pl->set("Number of Samples", numSamples);
   pl->set("Block Sizes", Teuchos::Array<int>(blockSizes));
-  pl->set("Ranks", Teuchos::Array<int>(ranks));
+  pl->set("Basis Sizes", Teuchos::Array<int>(basisSizes));
 
   Teuchos::TwoDArray<double> C(CHat.numRows(), CHat.numCols());
   for (int i = 0; i < CHat.numRows(); ++i)
@@ -77,39 +76,28 @@ KrylovSurrogateReport KrylovSurrogateHandle::buildReport() const {
       "Teko::KrylovSurrogateHandle::buildReport: the preconditioner has not been applied since "
       "it was last built, so there are no samples. Solve first.");
 
+#ifdef TEKO_HAVE_KRYLOV_SURROGATE
   using namespace KrylovSurrogate;
-  ReducedOperator red = buildReducedOperator(A_, recorder_->getSamples(),
-                                             recorder_->getFirstInput(), options_.truncationTol);
-
-  const int nb = blockRowCount(A_);
-  auto comm    = tpetraBlock(A_, 0, 0)->getRangeMap()->getComm();
-
-  const auto start = std::chrono::steady_clock::now();
-  std::vector<std::vector<int> > candidates =
-      buildCandidates(nb, options_.orderings, options_.candidateCount, options_.seed);
-
   KrylovSurrogateReport report;
-  report.candidates =
-      scoreCandidates(red.CHat, red.bHat, red.ranks, candidates, options_.searchTol, *comm);
+  report.numSamples = recorder_->numSamples();
+  buildReducedOperator(A_, recorder_->getSamples(), recorder_->getFirstInput(),
+                       options_.truncationTol, report);
+
+  auto comm         = tpetraBlock(A_, 0, 0)->getRangeMap()->getComm();
+  const auto start  = std::chrono::steady_clock::now();
+  report.candidates = scoreCandidates(
+      report.CHat, report.bHat, report.basisSizes,
+      buildCandidates(report.numBlocks, options_.orderings, options_.candidateCount, options_.seed),
+      options_.searchTol, *comm);
   const double elapsed =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   Teuchos::reduceAll<int, double>(*comm, Teuchos::REDUCE_MAX, 1, &elapsed, &report.searchWallTime);
-
-  report.numBlocks          = nb;
-  report.numSamples         = recorder_->numSamples();
-  report.blockSizes         = red.blockSizes;
-  report.ranks              = red.ranks;
-  report.CHat               = red.CHat;
-  report.bHat               = red.bHat;
-  report.rhsCapture         = red.rhsCapture;
-  report.diagonalDeviations = red.diagonalDeviations;
-  report.searchRanks        = comm->getSize();
+  report.searchRanks = comm->getSize();
   return report;
-}
-
-std::ostream& operator<<(std::ostream& os, const KrylovSurrogateHandle& handle) {
-  return os << "Teko::KrylovSurrogateHandle(" << (handle.isAttached() ? "attached" : "not attached")
-            << ")";
+#else
+  // unreachable: without the surrogate the factory throws before attaching
+  return KrylovSurrogateReport();
+#endif
 }
 
 }  // end namespace Teko

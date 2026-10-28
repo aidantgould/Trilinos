@@ -16,7 +16,6 @@
 #ifndef __Teko_KrylovSurrogateReport_hpp__
 #define __Teko_KrylovSurrogateReport_hpp__
 
-#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -25,7 +24,17 @@
 #include "Teuchos_SerialDenseMatrix.hpp"
 #include "Teuchos_SerialDenseVector.hpp"
 
+#include "TpetraCore_config.h"
+
+#include "Teko_Config.h"
 #include "Teko_Utilities.hpp"
+
+// The Krylov surrogate needs Tpetra's TSQR for its bases and Belos for its
+// search. Without either, "Krylov Surrogate" is still registered, but building
+// it throws, saying what is missing.
+#if defined(HAVE_TPETRA_TSQR) && defined(Teko_ENABLE_Belos)
+#define TEKO_HAVE_KRYLOV_SURROGATE
+#endif
 
 namespace Teko {
 
@@ -72,7 +81,7 @@ struct KrylovSurrogateReport {
   int numSamples = 0;
   std::vector<int> blockSizes;
   //! Directions retained per block, \f$r_j\f$
-  std::vector<int> ranks;
+  std::vector<int> basisSizes;
   Teuchos::SerialDenseMatrix<int, double> CHat;
   //! Projection of the solve's initial residual direction
   Teuchos::SerialDenseVector<int, double> bHat;
@@ -138,9 +147,6 @@ class KrylovSurrogateHandle {
   BlockedLinearOp A_;
   KrylovSurrogateOptions options_;
 };
-
-//! For printing a parameter list that holds a handle
-std::ostream& operator<<(std::ostream& os, const KrylovSurrogateHandle& handle);
 
 }  // end namespace Teko
 

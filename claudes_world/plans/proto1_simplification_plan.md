@@ -1,6 +1,6 @@
 # Plan: simplify proto1
 
-**Status: proposed 2026-10-28.** Applied on `aidantgould/teko-auto-proto1`. These are only
+**Status: built 2026-10-28** (see As built at the end). Applied on `aidantgould/teko-auto-proto1`. These are only
 the changes recommended in the proto1 review. Each is meant to make the code shorter or
 clearer at no meaningful performance cost.
 
@@ -56,3 +56,32 @@ clearer at no meaningful performance cost.
   recorder, the uniform random draw of orderings, and the copy of $K$ into a Thyra
   multivector.
 - No behaviour changes beyond item 1's reported residual.
+
+## As built
+
+All eight items applied as planned.
+
+**Results.**
+
+- The library went from 1446 to 1391 lines. Item 7's documented valid-parameter list
+  added about 25 of those, so the other items removed about 80.
+- Feature guards went from 7 sites to 4 (factory, report, reduced operator, search),
+  all on the one macro defined in `Teko_KrylovSurrogateReport.hpp`.
+- Teko's suite: 24 tests, all passing. That is 15 stock tests and 9 surrogate ones,
+  one fewer than before because the search and parallel tests now share
+  `Teko_KrylovSurrogateSearch`, which runs all 9 of its tests at 1 to 4 ranks.
+- End-to-end numbers are unchanged: 8 samples, basis sizes 8 8 8, diagonal
+  deviations up to 3e-14, a warm-start first input within 3e-17 of r0/||r0||.
+- The pyfront test passes 16/16 at 1 and 4 ranks, with the dict key `basis_sizes`,
+  and the demo runs.
+
+**Beyond the plan.**
+
+- The surrogate tests' CMake registration is wrapped in
+  `IF(TpetraCore_ENABLE_TSQR)`, since they cannot link without the feature.
+- `buildReport()` has an `#else` branch returning an empty report. It is
+  unreachable, because without the feature the factory throws before any handle is
+  attached.
+- A misspelled option now throws `Teuchos::Exceptions::InvalidParameter`, from
+  `validateParametersAndSetDefaults`, instead of `std::invalid_argument`. The test
+  checks the new type.
