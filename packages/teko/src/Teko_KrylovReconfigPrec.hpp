@@ -30,6 +30,9 @@
 #include "Teuchos_ParameterList.hpp"
 #include "Teuchos_RCP.hpp"
 
+// ── Belos ─────────────────────────────────────────────────────────────────
+#include "BelosTypes.hpp"  // DefaultSolverParameters::convTol
+
 // ── Thyra ─────────────────────────────────────────────────────────────────
 #include "Thyra_BlockedLinearOpBase.hpp"
 #include "Thyra_DefaultBlockedLinearOp.hpp"
@@ -123,6 +126,38 @@ inline double trueRelativeResidual(
 // convergence (a garbage answer reported as converged), it does not re-enforce
 // the tolerance itself.
 constexpr double kResidualSlack = 1.0e3;
+
+// The relative residual ||b - A x|| / ||b|| at which a Belos GMRES solve run
+// with params stops, given ||b|| and ||r0|| = ||b - A x0||. Belos scales its
+// implicit test by "Implicit Residual Scaling", so the raw "Convergence
+// Tolerance" is relative to ||b|| only under some scalings:
+//   Norm of Initial Residual,
+//   Norm of Preconditioned Initial Residual   tol * ||r0|| / ||b||
+//   Norm of RHS                               tol
+//   None                                      tol / ||b||
+//   User Provided                             tol (the scale is unknown here)
+// The preconditioned variant equals ||r0|| only without a left preconditioner,
+// which holds for every solve the hook runs. Absent keys take Belos's defaults,
+// BlockGmresSolMgr's being the preconditioned initial residual. ||b|| = 0
+// returns tol, matching trueRelativeResidual's absolute fallback.
+inline double relativeTarget(const Teuchos::ParameterList& params,
+                             double b_norm, double r0_norm)
+{
+    const double tol =
+        params.isParameter("Convergence Tolerance")
+            ? params.get<double>("Convergence Tolerance")
+            : static_cast<double>(Belos::DefaultSolverParameters::convTol);
+    const std::string scaling =
+        params.isParameter("Implicit Residual Scaling")
+            ? params.get<std::string>("Implicit Residual Scaling")
+            : std::string("Norm of Preconditioned Initial Residual");
+    if (!(b_norm > 0.0)) return tol;
+    if (scaling == "Norm of Initial Residual" ||
+        scaling == "Norm of Preconditioned Initial Residual")
+        return tol * r0_norm / b_norm;
+    if (scaling == "None") return tol / b_norm;
+    return tol;
+}
 
 // Extract A_blocked(i,j) as a Tpetra CrsMatrix (null if the block is null or
 // not a Tpetra CRS operator).

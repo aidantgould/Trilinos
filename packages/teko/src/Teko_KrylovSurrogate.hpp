@@ -164,9 +164,14 @@ inline SolveRecord solveOrdering(
     double                                             b_norm,
     bool                                               writeToLHS)
 {
+    // Every candidate starts from x0 = 0, so r0 = b and the target is
+    // relativeTarget at ||r0|| = ||b||, the same one the request sent the
+    // surrogate.
     SolveRecord r;
-    r.ordering         = ordering;
-    r.initial_residual = b_norm;
+    r.ordering                  = ordering;
+    r.initial_residual          = b_norm;
+    r.initial_relative_residual = (b_norm > 0.0) ? 1.0 : 0.0;
+    r.target_tol                = relativeTarget(*orig_params, b_norm, b_norm);
 
     ReconfiguredSystem recon;
     int local_err = 0;
@@ -216,17 +221,16 @@ inline SolveRecord solveOrdering(
     // early, so it would otherwise report converged with a low iteration count,
     // a small residual and a short iterate time: it would win every tiebreaker
     // in both selection comparators. Recording the true residual here is also
-    // what makes final_residual in conv.json meaningful.
-    const double tol = solverParams->get(
-        "Convergence Tolerance",
-        static_cast<double>(Belos::DefaultSolverParameters::convTol));
+    // what makes final_residual in conv.json meaningful. The verdict is held
+    // to target_tol, the tolerance converted to the relative residual
+    // trueRelativeResidual measures, not to the raw tolerance.
     const double true_res = trueRelativeResidual(
         Teuchos::rcp_dynamic_cast<const Thyra::LinearOpBase<SC>>(recon.flatOp),
         b_new, x_new);
 
     r.iters                 = solver.getNumIters();
     r.converged             = (ret == Belos::Converged) &&
-                              (true_res <= kResidualSlack * tol);
+                              (true_res <= kResidualSlack * r.target_tol);
     r.final_residual        = true_res;
     r.factor_wall_time_sec  = factor_sec;
     r.iterate_wall_time_sec = iterate_sec;
@@ -340,14 +344,23 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
         std::cout << "[TekoAdaptive] first solve done. curDim=" << state.curDim
                   << "  nb=" << nb << "\n";
 
-    // ||b||: shared initial residual for both solves. Both start from x0 = 0,
-    // and reordering (Phase 3) only regroups vector blocks, which preserves
-    // the 2-norm.
-    double b_norm = 0.0;
+    // ||b||, which every relative residual here is measured against.
+    // Reordering (Phase 3) only regroups vector blocks, which preserves the
+    // 2-norm. The candidate solves start from x0 = 0, so ||b|| is also their
+    // initial residual. Solve 1 started from whatever x0 the application
+    // passed: its ||r0|| is Belos's own initial residual, computed from that
+    // x0 at setProblem (the Tpetra route carries it over with setInitResVec),
+    // and ||b|| when there is none.
+    double b_norm = 0.0, r0_norm = 0.0;
     {
         Teuchos::Array<SC> norms(1);
         Thyra::norms_2(*problem->getRHS(), norms());
-        b_norm = norms[0];
+        b_norm  = norms[0];
+        r0_norm = b_norm;
+        if (auto r0 = problem->getInitResVec(); !r0.is_null()) {
+            Thyra::norms_2(*r0, norms());
+            r0_norm = norms[0];
+        }
     }
 
     // Setup (factorization) time of the first solve: everything the
@@ -380,18 +393,16 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
     // The initial row of conv.json. Its ordering is the application's own
     // blocking, every block its own group, and its converged flag gets the same
     // true-residual check every reconfigured solve gets in solveOrdering.
-    const double solve1_tol =
-        orig_params->isParameter("Convergence Tolerance")
-            ? orig_params->get<double>("Convergence Tolerance")
-            : static_cast<double>(Belos::DefaultSolverParameters::convTol);
     SolveRecord s1;
     s1.ordering.resize(nb);
     std::iota(s1.ordering.begin(), s1.ordering.end(), 0);
     s1.iters                 = solve1_metrics.num_iters;
     s1.type                  = "initial";
+    s1.target_tol            = relativeTarget(*orig_params, b_norm, r0_norm);
     s1.converged             = solve1_metrics.converged &&
-                               (solve1_true_res <= kResidualSlack * solve1_tol);
-    s1.initial_residual      = b_norm;
+                               (solve1_true_res <= kResidualSlack * s1.target_tol);
+    s1.initial_residual      = r0_norm;
+    s1.initial_relative_residual = (b_norm > 0.0) ? r0_norm / b_norm : r0_norm;
     s1.final_residual        = solve1_true_res;
     s1.factor_wall_time_sec  = solve1_factor_sec;
     s1.iterate_wall_time_sec = solve1_metrics.wall_time_sec;
@@ -416,7 +427,9 @@ inline Belos::AdaptiveHook::HookResult adaptiveLoop(
     // writes the request file.
     CHatData chat = computeCHat(state, A_blocked, problem->getRHS(), block_sizes);
     int request_id = -1;
-    if (rank == 0) request_id = writeRequestJson(chat, requests_dir);
+    if (rank == 0)
+        request_id = writeRequestJson(chat, requests_dir,
+                                      relativeTarget(*orig_params, b_norm, b_norm));
 
     // ── Phase 2: wait for s<N>_reconfig.json ───────────────────────────────
     // The response arrives from an external process via the filesystem, so

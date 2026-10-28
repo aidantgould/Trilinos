@@ -36,7 +36,11 @@ PYAUTOTEKO_DIR = Path(__file__).resolve().parents[2] / "pyautoteko"
 # one or two surrogate iterations of each other. See FGMRES.solve_reduced's
 # docstring and the wiki's vtilde-from-z.
 SURROGATE_JITTER = 1e-4
-SURROGATE_TOL = 1e-8        # relative residual the surrogate solve stops at
+# Relative residual the surrogate solve stops at when the request does not say.
+# A request carries the hook's target_tol, the relative residual its test
+# solves stop at under the application's tolerance and residual scaling, and
+# search() uses that instead so both predict the same target.
+SURROGATE_TOL = 1e-8
 MAX_SEARCH_COUNT = 600      # orderings scored per request, RandomSearch's cap
 
 # Fraction of the observed iteration range that counts as "as good as the
@@ -125,7 +129,7 @@ def blocks_from_request(request):
     return BlockMatrix(blocks=C_blocks), BlockMatrix(blocks=b_blocks)
 
 
-def surrogate_iters(C_hat, b_hat, jitter=SURROGATE_JITTER):
+def surrogate_iters(C_hat, b_hat, jitter=SURROGATE_JITTER, tol=SURROGATE_TOL):
     """A handle taking an ordering and returning its surrogate iteration count.
 
     Settings mirror FGMRES.solve_reduced, which is how pyautoteko evaluates its
@@ -134,7 +138,7 @@ def surrogate_iters(C_hat, b_hat, jitter=SURROGATE_JITTER):
     that fails to resolve reports that dimension rather than some larger budget).
     """
     n = C_hat.n
-    settings = dict(precond="gs", inner_tol=jitter, tol=SURROGATE_TOL,
+    settings = dict(precond="gs", inner_tol=jitter, tol=tol,
                     maxit=n, restart=n, autosolve=True)
 
     def iters(ordering):
@@ -180,6 +184,8 @@ def search(request, max_search_count=MAX_SEARCH_COUNT, jitter=SURROGATE_JITTER,
     there are few enough (541 at n_blocks = 5, all scored in about a second),
     a shuffled or sampled subset when there are not. No cost handle is passed,
     so cost falls back to unit_cost and the ranking is on iterations alone.
+    The surrogate stops at the request's target_tol, or SURROGATE_TOL when an
+    older request has none.
 
     Raises if pyautoteko is not importable; call available() first.
     """
@@ -187,7 +193,8 @@ def search(request, max_search_count=MAX_SEARCH_COUNT, jitter=SURROGATE_JITTER,
         raise RuntimeError(f"pyautoteko is not importable: {unavailable_reason()}")
 
     C_hat, b_hat = blocks_from_request(request)
-    rs = RandomSearch(None, surrogate_iters(C_hat, b_hat, jitter=jitter),
+    tol = request.get("target_tol", SURROGATE_TOL)
+    rs = RandomSearch(None, surrogate_iters(C_hat, b_hat, jitter=jitter, tol=tol),
                       request["n_blocks"], max_search_count=max_search_count,
                       seed=seed)
     opt_ordering, threshold = pick_opt_ordering(rs.results)

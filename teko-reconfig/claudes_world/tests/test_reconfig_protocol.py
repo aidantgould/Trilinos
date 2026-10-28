@@ -22,14 +22,16 @@ PYTHON = PYFRONT / "mypy" / "bin" / "python3"
 TIMEOUT_SEC = 300
 
 CONV_FIELDS = ["ordering", "surrogate_iters", "iters", "type", "surrogate_flags",
-               "converged", "initial_residual", "final_residual",
+               "converged", "initial_residual", "initial_relative_residual",
+               "target_tol", "final_residual",
                "factor_wall_time_sec", "iterate_wall_time_sec",
                "total_wall_time_sec"]
 SURROGATE_FIELDS = ("ordering", "surrogate_iters", "surrogate_flags")
+DEMO_TOL = 1e-8    # teko_ext.solve's default, which demo.py keeps
 
 
 def run_demo(send_use_ordering):
-    """Run demo.py and return {N: (reconfig, conv)} for every request."""
+    """Run demo.py and return {N: (reconfig, conv, request)} for every request."""
     with tempfile.TemporaryDirectory() as d:
         env = dict(os.environ,
                    TEKO_RECONFIG_REQUESTS_DIR=d,
@@ -48,7 +50,8 @@ def run_demo(send_use_ordering):
         for conv_path in Path(d).glob("s*_conv.json"):
             n = int(conv_path.name[1:-len("_conv.json")])
             reconfig = json.loads((Path(d) / f"s{n}_reconfig.json").read_text())
-            pairs[n] = (reconfig, json.loads(conv_path.read_text()))
+            request = json.loads((Path(d) / f"s{n}_request.json").read_text())
+            pairs[n] = (reconfig, json.loads(conv_path.read_text()), request)
         assert not list(Path(d).glob("s*_solved.json")), "solved.json is retired"
     assert pairs, "the demo wrote no conv.json"
     return pairs
@@ -70,6 +73,19 @@ def better_by_time(a, b):
     # null is a NaN in C++, and a comparison with NaN is false
     ra, rb = a["final_residual"], b["final_residual"]
     return ra is not None and rb is not None and ra < rb
+
+
+def check_residuals(n, conv, request):
+    """The demo starts every solve from x0 = 0 under Belos's default scaling,
+    so each row's initial relative residual is 1, its absolute one is ||b||,
+    and every target, the request's included, is the demo's tolerance."""
+    assert request["target_tol"] == DEMO_TOL
+    b_norm = conv["solves"][0]["initial_residual"]
+    assert b_norm > 0
+    for row in conv["solves"]:
+        assert abs(row["initial_residual"] - b_norm) <= 1e-12 * b_norm, f"s{n}"
+        assert abs(row["initial_relative_residual"] - 1.0) <= 1e-12, f"s{n}"
+        assert abs(row["target_tol"] - DEMO_TOL) <= 1e-12 * DEMO_TOL, f"s{n}"
 
 
 def check_pair(n, reconfig, conv, send_use_ordering):
@@ -118,23 +134,24 @@ def check_pair(n, reconfig, conv, send_use_ordering):
 
 def check_run(send_use_ordering):
     pairs = run_demo(send_use_ordering)
-    for n, (reconfig, conv) in sorted(pairs.items()):
+    for n, (reconfig, conv, request) in sorted(pairs.items()):
         check_pair(n, reconfig, conv, send_use_ordering)
+        check_residuals(n, conv, request)
     # the three-block case swept all 13 of its orderings
-    assert any(len(r["solves"]) == 13 for r, _ in pairs.values())
+    assert any(len(r["solves"]) == 13 for r, _, _ in pairs.values())
     return pairs
 
 
 def test_demo_with_use_ordering():
     pairs = check_run(send_use_ordering=True)
     assert all(c["solves"][-1]["type"].endswith("use_ordering")
-               for _, c in pairs.values())
+               for _, c, _ in pairs.values())
 
 
 def test_demo_without_use_ordering():
     pairs = check_run(send_use_ordering=False)
     assert all(c["solves"][-1]["type"].endswith("best_time")
-               for _, c in pairs.values())
+               for _, c, _ in pairs.values())
 
 
 if __name__ == "__main__":

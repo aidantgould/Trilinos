@@ -138,6 +138,35 @@ def test_search_is_deterministic():
     assert a.results == b.results
 
 
+def test_search_stops_at_the_requests_target_tol():
+    # the hook's target_tol reaches the surrogate: every ordering scores what
+    # surrogate_iters gives at that tolerance, and a looser target never needs
+    # more iterations than SURROGATE_TOL
+    req = fake_request(seed=3)
+    tight = surrogate_search.search(req)
+    req["target_tol"] = 1e-3
+    loose = surrogate_search.search(req)
+    C_hat, b_hat = surrogate_search.blocks_from_request(req)
+    at_target = surrogate_search.surrogate_iters(C_hat, b_hat, tol=1e-3)
+    assert loose.orderings() == tight.orderings()
+    for o in loose.orderings():
+        assert loose.iters_of(o) == at_target(o)
+        assert loose.iters_of(o) <= tight.iters_of(o)
+    assert sum(map(loose.iters_of, loose.orderings())) < \
+        sum(map(tight.iters_of, tight.orderings()))
+
+
+def test_search_without_target_tol_stops_at_surrogate_tol():
+    # a request from before target_tol existed scores exactly as it did
+    req = fake_request(seed=3)
+    assert "target_tol" not in req
+    result = surrogate_search.search(req)
+    C_hat, b_hat = surrogate_search.blocks_from_request(req)
+    at_default = surrogate_search.surrogate_iters(
+        C_hat, b_hat, tol=surrogate_search.SURROGATE_TOL)
+    assert all(result.iters_of(o) == at_default(o) for o in result.orderings())
+
+
 def test_search_on_a_recorded_request():
     # the real thing, if a request from a previous run is lying around
     # (requests/ is gitignored, so this is best effort). Capped at a handful of

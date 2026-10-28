@@ -12,8 +12,15 @@
 //           application without Thyra does it; reaches the type-erased hook
 // max_iters is the outer "Maximum Iterations" (default 200).
 //
-// Prints TRUERES, the explicit relative residual of the x the application got
-// back, and SOLVE CONVERGED or SOLVE UNCONVERGED, what the solver reported.
+// Three environment knobs set what a real application varies, for the
+// residual-target cases:
+//   ROUTE_B_SCALE      b is this constant (default 1)
+//   ROUTE_X0           the initial guess is this constant (default 0)
+//   ROUTE_RES_SCALING  Belos's "Implicit Residual Scaling" (default: Belos's own)
+//
+// Prints INITRES, the explicit relative residual of the initial guess, TRUERES,
+// the same for the x the application got back, and SOLVE CONVERGED or SOLVE
+// UNCONVERGED, what the solver reported.
 // Driven by test_tpetra_route.py, one process per case.
 
 #include <cstdlib>
@@ -49,6 +56,24 @@ using TOP       = Tpetra::Operator<SC, LO, GO, Node>;
 
 constexpr GO     kNodes = 20;    // per field
 constexpr double kTol   = 1e-8;
+
+double envDouble(const char* name, double dflt)
+{
+    const char* v = std::getenv(name);
+    return (v && *v) ? std::atof(v) : dflt;
+}
+
+// The application's Belos settings: the tolerance and iteration limits every
+// case uses, plus ROUTE_RES_SCALING when it is set.
+void setBelosParams(Teuchos::ParameterList& p, int maxIters)
+{
+    p.set("Convergence Tolerance", kTol);
+    p.set("Maximum Iterations", maxIters);
+    p.set("Num Blocks", 50);
+    p.set("Flexible Gmres", true);
+    if (const char* s = std::getenv("ROUTE_RES_SCALING"); s && *s)
+        p.set("Implicit Residual Scaling", std::string(s));
+}
 
 Teko::LinearOp wrap(Teuchos::RCP<CrsMatrix> A)
 {
@@ -92,10 +117,11 @@ Teuchos::RCP<CrsMatrix> interleavedCrs(Teuchos::RCP<const Teuchos::Comm<int>> co
     return A;
 }
 
-void report(int rank, double trueRes, bool converged)
+void report(int rank, double initRes, double trueRes, bool converged)
 {
     if (rank != 0) return;
     std::cout.precision(17);
+    std::cout << "INITRES " << initRes << std::endl;
     std::cout << "TRUERES " << trueRes << std::endl;
     std::cout << "SOLVE " << (converged ? "CONVERGED" : "UNCONVERGED") << std::endl;
 }
@@ -121,26 +147,28 @@ int runTpetra(Teuchos::RCP<const Teuchos::Comm<int>> comm, int maxIters)
 
     auto x = Teuchos::rcp(new TMV(A->getDomainMap(), 1));
     auto b = Teuchos::rcp(new TMV(A->getRangeMap(), 1));
-    b->putScalar(1.0);
+    x->putScalar(envDouble("ROUTE_X0", 0.0));
+    b->putScalar(envDouble("ROUTE_B_SCALE", 1.0));
+    auto relres = [&] {
+        TMV r(A->getRangeMap(), 1);
+        A->apply(*x, r);
+        r.update(1.0, *b, -1.0);
+        Teuchos::Array<SC> rn(1), bn(1);
+        r.norm2(rn());
+        b->norm2(bn());
+        return rn[0] / bn[0];
+    };
+    const double initRes = relres();
     auto problem = Teuchos::rcp(new Belos::LinearProblem<SC, TMV, TOP>(A, x, b));
     problem->setRightPrec(prec);
     problem->setProblem();
 
     auto params = Teuchos::rcp(new Teuchos::ParameterList);
-    params->set("Convergence Tolerance", kTol);
-    params->set("Maximum Iterations", maxIters);
-    params->set("Num Blocks", 50);
-    params->set("Flexible Gmres", true);
+    setBelosParams(*params, maxIters);
     Belos::BlockGmresSolMgr<SC, TMV, TOP> solver(problem, params);
     const Belos::ReturnType ret = solver.solve();
 
-    TMV r(A->getRangeMap(), 1);
-    A->apply(*x, r);
-    r.update(1.0, *b, -1.0);
-    Teuchos::Array<SC> rn(1), bn(1);
-    r.norm2(rn());
-    b->norm2(bn());
-    report(comm->getRank(), rn[0] / bn[0], ret == Belos::Converged);
+    report(comm->getRank(), initRes, relres(), ret == Belos::Converged);
     return 0;
 }
 
@@ -154,11 +182,7 @@ int runThyra(Teuchos::RCP<const Teuchos::Comm<int>> comm, int maxIters)
     pl->set("Linear Solver Type", "Belos");
     auto& belos = pl->sublist("Linear Solver Types").sublist("Belos");
     belos.set("Solver Type", "Block GMRES");
-    auto& gm = belos.sublist("Solver Types").sublist("Block GMRES");
-    gm.set("Convergence Tolerance", kTol);
-    gm.set("Maximum Iterations", maxIters);
-    gm.set("Num Blocks", 50);
-    gm.set("Flexible Gmres", true);
+    setBelosParams(belos.sublist("Solver Types").sublist("Block GMRES"), maxIters);
 
     pl->set("Preconditioner Type", "Teko");
     auto& teko = pl->sublist("Preconditioner Types").sublist("Teko");
@@ -175,14 +199,18 @@ int runThyra(Teuchos::RCP<const Teuchos::Comm<int>> comm, int maxIters)
 
     auto x = Thyra::createMember(A->domain());
     auto b = Thyra::createMember(A->range());
-    Thyra::assign(x.ptr(), 0.0);
-    Thyra::assign(b.ptr(), 1.0);
+    Thyra::assign(x.ptr(), envDouble("ROUTE_X0", 0.0));
+    Thyra::assign(b.ptr(), envDouble("ROUTE_B_SCALE", 1.0));
+    auto relres = [&] {
+        auto r = Thyra::createMember(A->range());
+        Thyra::V_V(r.ptr(), *b);
+        Thyra::apply<SC>(*A, Thyra::NOTRANS, *x, r.ptr(), -1.0, 1.0);
+        return Thyra::norm_2(*r) / Thyra::norm_2(*b);
+    };
+    const double initRes = relres();
     const auto status = Thyra::solve<SC>(*lows, Thyra::NOTRANS, *b, x.ptr());
 
-    auto r = Thyra::createMember(A->range());
-    Thyra::V_V(r.ptr(), *b);
-    Thyra::apply<SC>(*A, Thyra::NOTRANS, *x, r.ptr(), -1.0, 1.0);
-    report(comm->getRank(), Thyra::norm_2(*r) / Thyra::norm_2(*b),
+    report(comm->getRank(), initRes, relres(),
            status.solveStatus == Thyra::SOLVE_STATUS_CONVERGED);
     return 0;
 }

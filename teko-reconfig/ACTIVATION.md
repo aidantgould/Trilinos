@@ -158,6 +158,7 @@ and Krylov rank only (never the global problem size `n`).
   "krylov_dim": 5,                 // curDim (Krylov vectors captured)
   "ranks": [r0, r1, r2],           // per-block truncated rank, <= krylov_dim
   "equation_ends": [0, r0, r0+r1, R],  // block boundaries in C_hat/b_hat, R=sum(ranks)
+  "target_tol": 1e-8,              // relative residual the test solves stop at
   "C_hat": [[...], ...],           // R x R reduced operator
   "b_hat": [...]                   // length-R reduced RHS
 }
@@ -244,6 +245,8 @@ the reconfig did, plus what actually happened.
       "surrogate_flags": [],
       "converged": true,
       "initial_residual": 9.06,
+      "initial_relative_residual": 1.0,
+      "target_tol": 1e-8,
       "final_residual": 5.1e-16,
       "factor_wall_time_sec": 0.0005,
       "iterate_wall_time_sec": 0.0022,
@@ -268,6 +271,13 @@ the reconfig did, plus what actually happened.
   Gauss-Seidel every test and final run.
 - With no `use_ordering`, the best test appears twice, as a test and as the
   final, because no test keeps its solution vector.
+- `initial_residual` is the absolute `||r0||`, `||b - A x0||`. Every test and
+  final starts from `x0 = 0`, so theirs is `||b||`. The initial row's is
+  Belos's own initial residual from the application's `x0`, which is `||b||`
+  only when the application started from zero. `initial_relative_residual` is
+  `||r0|| / ||b||`, in the same units as `final_residual`: compare those two,
+  never `initial_residual` with `final_residual`.
+- `target_tol` is the relative residual the solve was held to (see below).
 - A number that is not finite (a NaN residual from a solve that broke down) is
   written `null`.
 - All wall times are the cross-rank maximum (critical path), so they're
@@ -281,7 +291,26 @@ it.
 `final_residual` in `conv.json` is the **explicitly
 recomputed** relative residual `||b - A x|| / ||b||`, not Belos's
 `achievedTol()`. Likewise `converged` requires both `Belos::Converged` and that
-recomputed residual being within `kResidualSlack` of the solver tolerance.
+recomputed residual being within `kResidualSlack` (10^3) of `target_tol`.
+
+`target_tol` is the application's `"Convergence Tolerance"` converted to the
+relative residual `||b - A x|| / ||b||` (`relativeTarget` in
+`Teko_KrylovReconfigPrec.hpp`). Belos scales its test by `"Implicit Residual
+Scaling"`, so the raw tolerance is relative to `||b||` only under some
+scalings:
+
+| Scaling | `target_tol` |
+|---|---|
+| Norm of (Preconditioned) Initial Residual (Belos's default) | `tol * ||r0|| / ||b||` |
+| Norm of RHS | `tol` |
+| None (absolute) | `tol / ||b||` |
+| User Provided | `tol` (the scale is unknown to the hook) |
+
+Every test and final starts from zero, so under the default scaling their
+target is `tol` itself. The request's `target_tol` is that same test target,
+and the surrogate stops there (below). Before this conversion, an application
+with absolute scaling and a small `||b||` had every verdict judged against the
+raw tolerance and marked unconverged.
 
 This matters because Belos judges convergence from its recursively updated
 (implicit) residual estimate, and cannot be asked for an explicit test here:
@@ -315,7 +344,10 @@ trilinos-teko-pyfront's `SETUP.md`):
    startup, before it answers anything.
 3. Each is scored by an FGMRES solve on the surrogate alone, at
    `SURROGATE_JITTER = 1e-4`, matching `kBlockSolveTol` so the surrogate is
-   evaluated under the same inexactness the real block solves run at. No cost
+   evaluated under the same inexactness the real block solves run at. It stops
+   at the request's `target_tol`, the relative residual the test solves stop
+   at, so both count iterations to the same target (`SURROGATE_TOL = 1e-8`
+   for a request without one). No cost
    model of the real system exists yet, so ranking is on iterations alone
    (`RandomSearch`'s `unit_cost`).
 4. The first row is the pick from `pick_opt_ordering`, flagged

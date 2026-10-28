@@ -123,6 +123,11 @@ inline Belos::AdaptiveHook::HookResult tpetraAdaptiveLoop(
     auto b = toBlocked(*problem->getRHS(), nrhs, map, src.blocked->range());
     auto thyraProblem = Teuchos::rcp(new Problem(
         Teuchos::rcp_implicit_cast<const OP>(src.blocked), x, b));
+    // Solve 1's initial residual, from the application's x0. The wrapper
+    // problem is never setProblem'd, so without this the hook would have no
+    // ||r0|| and would assume x0 = 0.
+    if (auto r0 = problem->getInitResVec(); !r0.is_null())
+        thyraProblem->setInitResVec(toBlocked(*r0, nrhs, map, src.blocked->range()));
 
     const Belos::AdaptiveHook::HookResult r =
         adaptiveLoop(thyraState, thyraProblem, src.blocked, args.params, args.metrics);

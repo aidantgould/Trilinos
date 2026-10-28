@@ -318,6 +318,7 @@ def handle_request(request_id):
     print(f"  equation_ends = {request['equation_ends']}")
     print(f"  C_hat shape   = {n_rows} x {n_cols}")
     print(f"  b_hat length  = {len(b_hat)}")
+    print(f"  target_tol    = {request.get('target_tol', 'absent')}")
 
     solves = choose_solves(request, request_id)
     write_reconfig(solves, reconfig_path, request_id)

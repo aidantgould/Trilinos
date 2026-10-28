@@ -180,9 +180,14 @@ inline SDM assembleBHat(const CHatData& chat, const std::vector<int>& equation_e
 //   "krylov_dim": m,
 //   "ranks": [...],
 //   "equation_ends": [0, r0, r0+r1, ..., R],   // length nb+1, R = sum(ranks)
+//   "target_tol": tau,                          // relative residual the tests stop at
 //   "C_hat": [ [ ... ], ... ],                  // single R x R matrix
 //   "b_hat": [ ... ]                            // single length-R vector
 // }
+//
+// target_tol is relativeTarget for the test solves (x0 = 0, the application's
+// tolerance and residual scaling), so the surrogate predicts the iteration
+// count of the same target the tests are scored on.
 //
 // C_hat is the full R x R surrogate operator (R = sum(ranks)) and b_hat the
 // full length-R reduced RHS, both assembled block-by-block. "equation_ends"
@@ -193,7 +198,8 @@ inline SDM assembleBHat(const CHatData& chat, const std::vector<int>& equation_e
 // Every entry scales with nb (number of blocks) and ranks[j] (Krylov-derived
 // rank, <= krylov_dim) only — nothing here scales with the global problem
 // size n, so this stays small even for very large systems.
-inline int writeRequestJson(const CHatData& chat, const std::string& requests_dir)
+inline int writeRequestJson(const CHatData& chat, const std::string& requests_dir,
+                            double target_tol)
 {
     const int request_id = nextRequestNumber(requests_dir);
 
@@ -218,6 +224,7 @@ inline int writeRequestJson(const CHatData& chat, const std::string& requests_di
     ofs << "  \"krylov_dim\": " << chat.krylov_dim << ",\n";
     ofs << "  \"ranks\": ";         writeIntArrayJson(ofs, chat.ranks);       ofs << ",\n";
     ofs << "  \"equation_ends\": "; writeIntArrayJson(ofs, equation_ends);    ofs << ",\n";
+    ofs << "  \"target_tol\": " << std::setprecision(17) << target_tol << ",\n";
 
     // C_hat: single R x R matrix
     ofs << "  \"C_hat\":\n";
@@ -503,8 +510,10 @@ struct SolveRecord {
     std::string              type;                  // initial | test | final from selection mode <m>
     std::vector<std::string> surrogate_flags;
     bool                     converged       = false;
-    double                   initial_residual      = 0.0;
-    double                   final_residual        = 0.0;
+    double                   initial_residual      = 0.0;  // ||r0||, absolute
+    double                   initial_relative_residual = 0.0;  // ||r0|| / ||b||
+    double                   target_tol            = 0.0;  // relativeTarget: where it stops
+    double                   final_residual        = 0.0;  // ||b - A x|| / ||b||
     double                   factor_wall_time_sec  = 0.0;
     double                   iterate_wall_time_sec = 0.0;
     double                   total_wall_time_sec   = 0.0;
@@ -579,6 +588,8 @@ inline void writeConvergenceJson(
         ofs << "],\n";
         ofs << "      \"converged\": " << (s.converged ? "true" : "false") << ",\n";
         ofs << "      \"initial_residual\": "; writeDoubleJson(ofs, s.initial_residual); ofs << ",\n";
+        ofs << "      \"initial_relative_residual\": "; writeDoubleJson(ofs, s.initial_relative_residual); ofs << ",\n";
+        ofs << "      \"target_tol\": "; writeDoubleJson(ofs, s.target_tol); ofs << ",\n";
         ofs << "      \"final_residual\": "; writeDoubleJson(ofs, s.final_residual); ofs << ",\n";
         ofs << "      \"factor_wall_time_sec\": "; writeDoubleJson(ofs, s.factor_wall_time_sec); ofs << ",\n";
         ofs << "      \"iterate_wall_time_sec\": "; writeDoubleJson(ofs, s.iterate_wall_time_sec); ofs << ",\n";
