@@ -22,6 +22,7 @@
 #include "Teko_LU2x2PreconditionerFactory.hpp"
 #include "Teko_IterativePreconditionerFactory.hpp"
 #include "Teko_DiagnosticPreconditionerFactory.hpp"
+#include "Teko_KrylovSurrogatePreconditionerFactory.hpp"
 #include "Teko_DiagonallyScaledPreconditionerFactory.hpp"
 #include "Teko_DiagonalPreconditionerFactory.hpp"
 #include "Teko_AdaptivePreconditionerFactory.hpp"
@@ -262,6 +263,9 @@ void PreconditionerFactory::initializePrecFactoryBuilder() {
 
   clone = rcp(new AutoClone<DiagnosticPreconditionerFactory>());
   precFactoryBuilder_.addClone("Diagnostic Inverse", clone);
+
+  clone = rcp(new AutoClone<KrylovSurrogatePreconditionerFactory>());
+  precFactoryBuilder_.addClone("Krylov Surrogate", clone);
 
   clone = rcp(new AutoClone<DiagonallyScaledPreconditionerFactory>());
   precFactoryBuilder_.addClone("Diagonal Scaling", clone);
