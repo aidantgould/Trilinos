@@ -692,3 +692,71 @@ except where noted. Nothing pushed.
   padded TSQR buffer.
 - Front end: the hack's `kResidualSlack = 1e3` check on the real solve was kept, now
   local to `teko_ext.cpp`.
+
+## 8. Lessons from proto1
+
+Written 2026-10-28. What proto1 built is recorded in section 7 above.
+
+**The design held.** None of the fallbacks the plan prepared for were needed:
+
+- Belos accepted $K$, stored as a Thyra multivector on a serial space, as its operator,
+  so no wrapper was needed.
+- `offsetViewNonConst` let $A_{jj}Z_j$ be computed straight into the padded TSQR
+  buffer.
+- Stratimikos and Teko's `StratimikosFactory` passed the `RCP` handle through the
+  "Inverse Factory Library" sublist unchanged.
+
+Padding with zero rows matched the dense reference to 3e-15 in every distribution,
+including a block held entirely by one rank.
+
+**The test problems are too small to say anything about search quality.**
+
+- End to end, 8 FGMRES iterations gave 8 samples and every block kept all 8
+  directions, so truncation never acted.
+- In the demo every candidate converged in at most 2 surrogate iterations.
+- Problems where blocks have more samples than effective rank, and where real
+  iteration counts differ between orderings, are a precondition for 3.8's
+  truncation and jitter-loss measurements, not an afterthought.
+
+**Build and tooling.**
+
+- Teko's CMake globs `src/*.cpp` at configure time. Re-run cmake after adding files
+  and before building. The first full build compiled the registration line in
+  `Teko_PreconditionerFactory.cpp` before the new files existed, and every Teko test
+  failed to link.
+- A background build's exit status was hidden behind the `tail` that ended its
+  command, so the failure above looked like success until the log was read. End
+  long jobs with an explicit success marker, and check for it.
+- The existing `trilinos-build` lacked TSQR, Galeri and Teko's tests, so the feature
+  needed its own build directory. Switching the main Trilinos tree off the hack
+  branch also leaves `trilinos-build` impossible to rebuild. A git worktree per
+  build would have avoided both.
+- Belos is an optional dependency of Teko's library, so code that uses it needs a
+  config macro (`Teko_ENABLE_Belos`). TriBITS defines it automatically, even though
+  the cache shows the option empty.
+- clang-format is not installed. Version 14, the one Teko's `.clang-format` names,
+  installs from the `clang-format` pip wheel into a scratch directory.
+
+**Code.**
+
+- `Teko::ImplicitLinearOp` hands `implicitApply` its input as a const-only `RCP`
+  (`rcp_const_cast` of a const reference). Calling a non-const method on it, such as
+  `subView`, compiles but throws `NonconstAccessError` at run time. Take const views
+  of inputs.
+- The front end built its preconditioner directly with
+  `createBlockLowerTriInverseOp`, so wrapping it meant moving to a Teko inverse
+  library. Teko's `"Block Gauss-Seidel"` uses the lower triangle by default, which
+  matched the old behaviour and the surrogate's candidates.
+
+**Tests.**
+
+- Defining every test entry as a formula of its global indices let each rank build
+  the whole dense reference itself. That made distribution tests easy to write.
+- Comparing $|\hat{C}|$ entry by entry against the reference sidesteps the sign
+  ambiguity of the SVD, as long as the singular values are distinct.
+- The first "singular group block" test was wrong: its $\hat{C}$ was itself singular, so
+  the Gauss-Seidel candidate could not converge either. The test needs a nonsingular
+  $\hat{C}$ whose merged principal block is singular, the situation wiki
+  `selection-invertibility` describes.
+- Teuchos's `TEST_EQUALITY` cannot print a `std::vector`, so it fails to compile on
+  one. Use `TEST_ASSERT(a == b)`.
