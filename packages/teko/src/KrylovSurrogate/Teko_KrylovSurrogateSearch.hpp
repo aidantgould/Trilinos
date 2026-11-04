@@ -10,6 +10,10 @@
 /** \file Teko_KrylovSurrogateSearch.hpp
  *
  * Scores candidate block configurations on the Krylov surrogate.
+ *
+ * Implementation detail of the "Krylov Surrogate" inverse, not user API: the
+ * declarations are in Teko::KrylovSurrogate::Impl and may change without notice.
+ * The user API is Teko_KrylovSurrogateReport.hpp.
  */
 
 #ifndef __Teko_KrylovSurrogateSearch_hpp__
@@ -25,6 +29,7 @@
 
 namespace Teko {
 namespace KrylovSurrogate {
+namespace Impl {
 
 /** \brief Number of orderings of n blocks: ordered set partitions, the Fubini
  *         numbers 1, 1, 3, 13, 75, 541, ... (a double, since it grows fast).
@@ -47,6 +52,9 @@ bool isValidOrdering(const std::vector<int>& ordering, int n);
 /** \brief The candidates to score: the user's orderings, the identity and
  *         all-merged extremes, then every other configuration if there are at
  *         most count in all, or else a seeded uniform sample up to count.
+ *
+ * The user's orderings and the two extremes are always included, so the result
+ * can hold more than count candidates.
  */
 std::vector<std::vector<int> > buildCandidates(int n,
                                                const std::vector<std::vector<int> >& userOrderings,
@@ -59,19 +67,23 @@ std::vector<std::vector<int> > buildCandidates(int n,
 DenseMatrix gaussSeidelSelection(const DenseMatrix& C, const std::vector<int>& basisSizes,
                                  const std::vector<int>& ordering);
 
+#ifdef TEKO_HAVE_KRYLOV_SURROGATE
 /** \brief Score every candidate on the surrogate and return them sorted:
  *         converged first, then fewest iterations, then best rate.
  *
  * Each candidate is scored by forming \f$K = C [C]_{S_1}^{-1}\f$ explicitly and
  * running unpreconditioned Belos GMRES on \f$K y = b\f$ from zero. Candidates are
  * dealt round-robin over the ranks of comm and gathered, so the result is
- * bitwise identical on every rank. Collective.
+ * bitwise identical on every rank. A candidate whose scoring throws is
+ * reported as SOLVER_ERROR, with the message on Teko's output stream. Collective.
  */
 std::vector<Report::Candidate> scoreCandidates(const DenseMatrix& C, const DenseVector& b,
                                                const std::vector<int>& basisSizes,
                                                const std::vector<std::vector<int> >& candidates,
                                                double tol, const Teuchos::Comm<int>& comm);
+#endif
 
+}  // namespace Impl
 }  // namespace KrylovSurrogate
 }  // end namespace Teko
 

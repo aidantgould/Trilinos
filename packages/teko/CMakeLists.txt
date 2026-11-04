@@ -25,6 +25,18 @@ COMBINED_OPTION(
 )
 MESSAGE(STATUS "TEKO_HAVE_EPETRA = ${TEKO_HAVE_EPETRA}")
 
+COMBINED_OPTION(
+  TEKO_HAVE_KRYLOV_SURROGATE
+  DEP_OPTIONS_NAMES
+  TpetraCore_ENABLE_TSQR
+  Teko_ENABLE_Belos
+  DOCSTR
+  "Enable the \"Krylov Surrogate\" inverse, which needs Tpetra's TSQR for its"
+  " bases and Belos for its search. Defaults to ON if both are enabled, otherwise"
+  " OFF. Without it, the type is still registered, and building it throws."
+)
+MESSAGE(STATUS "TEKO_HAVE_KRYLOV_SURROGATE = ${TEKO_HAVE_KRYLOV_SURROGATE}")
+
 IF(${PACKAGE_NAME}_ENABLE_MueLu)
   GLOBAL_SET(HAVE_MUELU ON)
 ELSE()

@@ -56,7 +56,20 @@ void RecorderOp::record(const MultiVector& z) const {
   const int cols = std::min(room, static_cast<int>(z->domain()->dim()));
   if (cols <= 0) return;
 
-  if (store_ == Teuchos::null) store_ = Thyra::createMembers(prec_->range(), maxSamples_);
+  // Grow by doubling up to the cap, so a short solve doesn't hold maxSamples
+  // full-length vectors. Growing copies the samples kept so far.
+  const int capacity = (store_ == Teuchos::null) ? 0 : static_cast<int>(store_->domain()->dim());
+  if (count_ + cols > capacity) {
+    const int grown =
+        std::min(maxSamples_, std::max({2 * capacity, kInitialCapacity, count_ + cols}));
+    MultiVector bigger = Thyra::createMembers(prec_->range(), grown);
+    if (count_ > 0) {
+      const Teuchos::RCP<const Thyra::MultiVectorBase<double> > kept = store_;
+      Thyra::assign(bigger->subView(Teuchos::Range1D(0, count_ - 1)).ptr(),
+                    *kept->subView(Teuchos::Range1D(0, count_ - 1)));
+    }
+    store_ = bigger;
+  }
 
   const Teuchos::RCP<const Thyra::MultiVectorBase<double> > cz = z;
   Thyra::assign(store_->subView(Teuchos::Range1D(count_, count_ + cols - 1)).ptr(),
@@ -78,6 +91,7 @@ void RecorderOp::describe(Teuchos::FancyOStream& out_arg,
                           const Teuchos::EVerbosityLevel verbLevel) const {
   out_arg << "Teko::KrylovSurrogate::RecorderOp: " << count_ << " of " << maxSamples_
           << " samples recorded, wrapping:\n";
+  Teuchos::OSTab tab(out_arg);
   prec_->describe(out_arg, verbLevel);
 }
 

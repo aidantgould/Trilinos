@@ -248,10 +248,11 @@ TRIBITS_ADD_EXECUTABLE_AND_TEST(
   NUM_MPI_PROCS 1
 )
 
-# The Krylov surrogate needs Tpetra's TSQR. Its search and parallel tests share
-# one executable, and check bitwise rank invariance, so they run at several rank
-# counts (3 so candidates don't divide evenly).
-IF(TpetraCore_ENABLE_TSQR)
+# The Krylov surrogate's tests exist only with the feature. Its search and
+# parallel tests share one executable, and check bitwise rank invariance, so they
+# run at several rank counts (3 so candidates don't divide evenly). The factory
+# tests use exact Amesos2 block solves.
+IF(TEKO_HAVE_KRYLOV_SURROGATE)
   TRIBITS_ADD_EXECUTABLE(
     KrylovSurrogateSearch
     SOURCES unit_tests/tKrylovSurrogateSearch.cpp unit_tests/tKrylovSurrogateParallel.cpp
@@ -270,11 +271,6 @@ IF(TpetraCore_ENABLE_TSQR)
     SOURCES unit_tests/tKrylovSurrogateReducedOperator.cpp ${UNIT_TEST_DRIVER}
     COMM serial mpi
   )
-  TRIBITS_ADD_EXECUTABLE(
-    KrylovSurrogateFactory
-    SOURCES unit_tests/tKrylovSurrogateFactory.cpp ${UNIT_TEST_DRIVER}
-    COMM serial mpi
-  )
   FOREACH(NP 1 2 3 4)
     TRIBITS_ADD_TEST(KrylovSurrogateSearch NAME_POSTFIX np${NP}
       COMM serial mpi ARGS ${SERIAL_ARGS_STRING} NUM_MPI_PROCS ${NP})
@@ -282,9 +278,18 @@ IF(TpetraCore_ENABLE_TSQR)
   FOREACH(NP 1 4)
     TRIBITS_ADD_TEST(KrylovSurrogateReducedOperator NAME_POSTFIX np${NP}
       COMM serial mpi ARGS ${SERIAL_ARGS_STRING} NUM_MPI_PROCS ${NP})
-    TRIBITS_ADD_TEST(KrylovSurrogateFactory NAME_POSTFIX np${NP}
-      COMM serial mpi ARGS ${SERIAL_ARGS_STRING} NUM_MPI_PROCS ${NP})
   ENDFOREACH()
+  IF(Teko_ENABLE_Amesos2)
+    TRIBITS_ADD_EXECUTABLE(
+      KrylovSurrogateFactory
+      SOURCES unit_tests/tKrylovSurrogateFactory.cpp ${UNIT_TEST_DRIVER}
+      COMM serial mpi
+    )
+    FOREACH(NP 1 4)
+      TRIBITS_ADD_TEST(KrylovSurrogateFactory NAME_POSTFIX np${NP}
+        COMM serial mpi ARGS ${SERIAL_ARGS_STRING} NUM_MPI_PROCS ${NP})
+    ENDFOREACH()
+  ENDIF()
 ENDIF()
 
 TRIBITS_ADD_EXECUTABLE_AND_TEST(

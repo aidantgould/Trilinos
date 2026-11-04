@@ -16,10 +16,8 @@
 #include <set>
 
 #ifdef TEKO_HAVE_KRYLOV_SURROGATE
-
 #include "Teuchos_CommHelpers.hpp"
 #include "Teuchos_SerialDenseSolver.hpp"
-#include "Teuchos_oblackholestream.hpp"
 
 #include "BelosBlockGmresSolMgr.hpp"
 #include "BelosLinearProblem.hpp"
@@ -27,22 +25,13 @@
 #include "Thyra_DefaultSpmdVectorSpace.hpp"
 #include "Thyra_DetachedMultiVectorView.hpp"
 #include "Thyra_MultiVectorStdOps.hpp"
+#endif
 
 namespace Teko {
 namespace KrylovSurrogate {
+namespace Impl {
 
 namespace {
-
-enum Status { CONVERGED = 0, MAX_ITERATIONS = 1, SINGULAR = 2, SOLVER_ERROR = 3 };
-
-const char* statusName(int status) {
-  switch (status) {
-    case CONVERGED: return "converged";
-    case MAX_ITERATIONS: return "max iterations";
-    case SINGULAR: return "singular group block";
-    default: return "solver error";
-  }
-}
 
 double binomial(int n, int k) {
   double c = 1.0;
@@ -62,8 +51,12 @@ void partitions(int k, int used, std::vector<int>& labels, std::vector<std::vect
   }
 }
 
+#ifdef TEKO_HAVE_KRYLOV_SURROGATE
+
+typedef Report::Candidate Candidate;
+
 struct Scored {
-  int status                   = SOLVER_ERROR;
+  int status                   = Candidate::SOLVER_ERROR;
   int iterations               = 0;
   double finalRelativeResidual = std::numeric_limits<double>::quiet_NaN();
   double rate                  = std::numeric_limits<double>::quiet_NaN();
@@ -73,20 +66,21 @@ typedef Thyra::MultiVectorBase<double> ThyraMV;
 typedef Thyra::LinearOpBase<double> ThyraOp;
 
 // Scores candidates one at a time on serial Thyra vectors, reusing one Belos
-// solver manager so its timers are registered once.
+// solver manager so its timers are registered once. It lives only inside
+// scoreCandidates, which owns what the references point at.
 class Scorer {
  public:
   Scorer(const DenseMatrix& C, const DenseVector& b, const std::vector<int>& basisSizes, double tol)
       : C_(C), basisSizes_(basisSizes), R_(C.numRows()) {
     space_ = Thyra::defaultSpmdVectorSpace<double>(R_);
 
+    // Belos's error messages go where Teko's do, so a failed candidate leaves a trace
     auto params = Teuchos::rcp(new Teuchos::ParameterList);
     params->set("Num Blocks", R_);
     params->set("Maximum Iterations", R_);
     params->set("Convergence Tolerance", tol);
     params->set("Verbosity", static_cast<int>(Belos::Errors));
-    params->set("Output Stream",
-                Teuchos::RCP<std::ostream>(Teuchos::rcp(new Teuchos::oblackholestream)));
+    params->set("Output Stream", Teuchos::RCP<std::ostream>(Teko::getOutputStream()));
     params->set("Timer Label", std::string("Teko Krylov Surrogate"));
     solver_ = Teuchos::rcp(new Belos::BlockGmresSolMgr<double, ThyraMV, ThyraOp>);
     solver_->setParameters(params);
@@ -100,18 +94,24 @@ class Scorer {
 
   Scored score(const std::vector<int>& ordering) {
     Scored s;
+    // Everything is caught here, on purpose: a candidate that throws on one rank
+    // must not leave the other ranks waiting in the gather that follows. The
+    // message goes to Teko's output stream instead.
     try {
       // [C]_S1^{-1}, in place. It is singular exactly when a merged group's
-      // block is, since singleton groups' blocks are I.
+      // block is, since singleton groups' blocks are I. Only exact singularity
+      // (a zero pivot) is detected here.
       DenseMatrix S = gaussSeidelSelection(C_, basisSizes_, ordering);
       Teuchos::SerialDenseSolver<int, double> inverse;
       inverse.setMatrix(Teuchos::rcpFromRef(S));
       if (inverse.invert() != 0) {
-        s.status = SINGULAR;
+        s.status = Candidate::SINGULAR_GROUP_BLOCK;
         return s;
       }
 
-      // K = C [C]_S1^{-1}, held as a Thyra multivector, which is its own operator
+      // K = C [C]_S1^{-1}, held as a Thyra multivector, which is its own
+      // operator. An explicit inverse is less stable than applying an LU
+      // factorization, and is kept for simplicity at these sizes.
       DenseMatrix K(R_, R_);
       K.multiply(Teuchos::NO_TRANS, Teuchos::NO_TRANS, 1.0, C_, S, 0.0);
       auto Kop = Thyra::createMembers(space_, R_);
@@ -130,12 +130,16 @@ class Scorer {
 
       // Belos's own verdict and residual are reliable here: the GMRES is
       // unpreconditioned on a fixed matrix, unlike the flexible solve the
-      // surrogate came from.
-      s.status                = solver_->solve() == Belos::Converged ? CONVERGED : MAX_ITERATIONS;
+      // surrogate came from. Unconverged covers the iteration limit and a loss
+      // of accuracy alike.
+      s.status =
+          solver_->solve() == Belos::Converged ? Candidate::CONVERGED : Candidate::NOT_CONVERGED;
       s.iterations            = solver_->getNumIters();
       s.finalRelativeResidual = solver_->achievedTol();
       s.rate = s.iterations > 0 ? std::pow(s.finalRelativeResidual, 1.0 / s.iterations) : 0.0;
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+      *Teko::getOutputStream() << "Teko \"Krylov Surrogate\": scoring a candidate failed: "
+                               << e.what() << "\n";
       s = Scored();
     }
     return s;
@@ -150,6 +154,15 @@ class Scorer {
   Teuchos::RCP<Belos::BlockGmresSolMgr<double, ThyraMV, ThyraOp> > solver_;
   Teuchos::RCP<ThyraMV> bThyra_;
 };
+
+// x before y, with NaN after every number, so sorting stays a strict weak ordering
+bool rateBefore(double x, double y) {
+  if (std::isnan(x)) return false;
+  if (std::isnan(y)) return true;
+  return x < y;
+}
+
+#endif  // TEKO_HAVE_KRYLOV_SURROGATE
 
 }  // namespace
 
@@ -205,12 +218,12 @@ std::vector<int> randomConfiguration(int n, std::mt19937_64& rng) {
 
 bool isValidOrdering(const std::vector<int>& ordering, int n) {
   if (static_cast<int>(ordering.size()) != n || n == 0) return false;
+  // every position in range first, so used[] below is never sized from a bad entry
+  for (int p : ordering)
+    if (p < 0 || p >= n) return false;
   const int groups = *std::max_element(ordering.begin(), ordering.end()) + 1;
   std::vector<bool> used(groups, false);
-  for (int p : ordering) {
-    if (p < 0) return false;
-    used[p] = true;
-  }
+  for (int p : ordering) used[p] = true;
   return std::all_of(used.begin(), used.end(), [](bool u) { return u; });
 }
 
@@ -263,6 +276,8 @@ DenseMatrix gaussSeidelSelection(const DenseMatrix& C, const std::vector<int>& b
   return S;
 }
 
+#ifdef TEKO_HAVE_KRYLOV_SURROGATE
+
 std::vector<Report::Candidate> scoreCandidates(const DenseMatrix& C, const DenseVector& b,
                                                const std::vector<int>& basisSizes,
                                                const std::vector<std::vector<int> >& candidates,
@@ -289,29 +304,24 @@ std::vector<Report::Candidate> scoreCandidates(const DenseMatrix& C, const Dense
     Teuchos::reduceAll<int, double>(comm, Teuchos::REDUCE_SUM, 4 * nc, mine.data(), all.data());
 
   std::vector<Report::Candidate> out(nc);
-  std::vector<int> status(nc);
   for (int i = 0; i < nc; ++i) {
-    status[i]                    = static_cast<int>(all[4 * i + 0]);
     out[i].ordering              = candidates[i];
-    out[i].status                = statusName(status[i]);
+    out[i].status                = static_cast<Candidate::Status>(static_cast<int>(all[4 * i + 0]));
     out[i].iterations            = static_cast<int>(all[4 * i + 1]);
     out[i].finalRelativeResidual = all[4 * i + 2];
     out[i].rate                  = all[4 * i + 3];
   }
 
-  std::vector<int> order(nc);
-  std::iota(order.begin(), order.end(), 0);
-  std::stable_sort(order.begin(), order.end(), [&](int x, int y) {
-    if (status[x] != status[y]) return status[x] < status[y];
-    if (out[x].iterations != out[y].iterations) return out[x].iterations < out[y].iterations;
-    return out[x].rate < out[y].rate;
+  std::stable_sort(out.begin(), out.end(), [](const Candidate& x, const Candidate& y) {
+    if (x.status != y.status) return x.status < y.status;
+    if (x.iterations != y.iterations) return x.iterations < y.iterations;
+    return rateBefore(x.rate, y.rate);
   });
-  std::vector<Report::Candidate> sorted;
-  for (int i : order) sorted.push_back(out[i]);
-  return sorted;
+  return out;
 }
 
+#endif  // TEKO_HAVE_KRYLOV_SURROGATE
+
+}  // namespace Impl
 }  // namespace KrylovSurrogate
 }  // end namespace Teko
-
-#endif  // TEKO_HAVE_KRYLOV_SURROGATE

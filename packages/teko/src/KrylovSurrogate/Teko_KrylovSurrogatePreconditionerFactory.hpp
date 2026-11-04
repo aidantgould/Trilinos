@@ -25,8 +25,9 @@ namespace KrylovSurrogate {
  * reduced operator \f$\hat{C}\f$, the reduced right-hand side \f$\hat{b}\f$, and how
  * each of a set of alternative lower block Gauss-Seidel configurations
  * converges on the surrogate. The operator must be blocked, with every nonzero
- * block backed by Tpetra, and Teko must be built with Belos and Tpetra with
- * TSQR.
+ * block backed by Tpetra (a Thyra::TpetraLinearOp: a scaled or transposed
+ * wrapper around one is rejected), and Teko must be built with Belos and
+ * Tpetra with TSQR.
  *
  \code
     auto handle = Teko::KrylovSurrogate::Handle::create();
@@ -38,7 +39,9 @@ namespace KrylovSurrogate {
        <Parameter name="Type" type="string" value="Krylov Surrogate"/>
        <Parameter name="Inverse Factory" type="string" value="<Some Block Inverse>"/>
        <!-- Optional. Columns of preconditioner output kept, each one full-length
-            vector of memory. Default 100. -->
+            vector of memory. The store grows as samples arrive. Building the
+            report needs about three times the samples' memory again, at peak.
+            Default 100. -->
        <Parameter name="Maximum Samples" type="int" value="100"/>
        <!-- Optional. Singular values kept per block, relative. Default 1e-10. -->
        <Parameter name="Truncation Tolerance" type="double" value="1e-10"/>
@@ -56,7 +59,9 @@ namespace KrylovSurrogate {
          <Parameter name="Print" type="bool" value="false"/>
          <!-- Inverses written into each candidate's Hierarchical Block
               Gauss-Seidel list: single-block groups, and merged groups (which
-              get a blocked operator). Placeholders if unset. -->
+              get a blocked operator). Placeholders if unset. The surrogate
+              scored exact solves of both, so name direct solvers (or tight
+              iterative ones) for the list to mean what was predicted. -->
          <Parameter name="Inverse Type" type="string" value="<Some Inverse>"/>
          <Parameter name="Merged Inverse Type" type="string" value="<Some Block Inverse>"/>
        </ParameterList>
@@ -66,18 +71,28 @@ namespace KrylovSurrogate {
  * A "Report Handle" (a Teuchos::RCP<Teko::KrylovSurrogate::Handle>, set from
  * code: see Handle) gives the report to the application. One of it and
  * "Report" > "Print" is required, or the report could never be seen.
+ *
+ * With "Print" on, a rebuild first builds and prints the report of the solves
+ * since the previous build, so it is collective over the operator's
+ * communicator, like Handle::buildReport, and runs the search. Nothing
+ * rebuilds after the last solve of a run, so that solve is never printed: use
+ * a handle to see it.
  */
-class PreconditionerFactory : public virtual Teko::PreconditionerFactory {
+class KrylovSurrogatePreconditionerFactory : public virtual Teko::PreconditionerFactory {
  public:
   //! Default constructor, for use with the AutoClone class.
-  PreconditionerFactory();
+  KrylovSurrogatePreconditionerFactory();
 
-  PreconditionerFactory(const Teuchos::RCP<Teko::InverseFactory>& invFactory,
-                        const Teuchos::RCP<Handle>& handle, const Options& options);
+  //! The options are used as given, without the parameter list's validation
+  KrylovSurrogatePreconditionerFactory(const Teuchos::RCP<Teko::InverseFactory>& invFactory,
+                                       const Teuchos::RCP<Handle>& handle, const Options& options);
 
   virtual LinearOp buildPreconditionerOperator(LinearOp& lo, PreconditionerState& state) const;
 
   virtual void initializeFromParameterList(const Teuchos::ParameterList& settings);
+
+  //! Every option, with its default, documentation and valid range
+  virtual Teuchos::RCP<const Teuchos::ParameterList> getValidParameters() const;
 
   virtual Teuchos::RCP<Teuchos::ParameterList> getRequestedParameters() const;
 

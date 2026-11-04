@@ -11,6 +11,9 @@
 #include <Teuchos_UnitTestHarness.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <algorithm>
+#include <vector>
+
 #include "Tpetra_Core.hpp"
 #include "Tpetra_CrsMatrix.hpp"
 
@@ -124,4 +127,25 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, alpha_and_beta) {
   Thyra::update(2.0, *Mx, expect.ptr());
   TEST_FLOATING_EQUALITY(maxDiff(y, expect) + 1.0, 1.0, 1e-14);
   TEST_FLOATING_EQUALITY(maxDiff(rec.getSamples(), Mx) + 1.0, 1.0, 1e-15);
+}
+
+TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, store_grows_and_keeps_every_column) {
+  // The store starts small and doubles: 40 single-column applies cross two
+  // growths (16, 32, then the cap of 40), and every column must survive both
+  Teko::ModifiableLinearOp M = diagonalOp(9);
+  Teko::KrylovSurrogate::RecorderOp rec(M, 40);
+
+  std::vector<Teko::MultiVector> outputs;
+  for (int k = 0; k < 45; ++k) {
+    Teko::MultiVector x = filled(M, 1, 10 + k);
+    Teko::MultiVector y = Thyra::createMembers(M->range(), 1);
+    rec.apply(Thyra::NOTRANS, *x, y.ptr(), 1.0, 0.0);
+    outputs.push_back(y);
+  }
+  TEST_EQUALITY(rec.numSamples(), 40);
+  TEST_EQUALITY(rec.getSamples()->domain()->dim(), 40);
+  double worst = 0.0;
+  for (int k = 0; k < 40; ++k)
+    worst = std::max(worst, maxDiff(rec.getSamples()->subView(Teuchos::Range1D(k, k)), outputs[k]));
+  TEST_EQUALITY(worst, 0.0);
 }

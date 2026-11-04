@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "Thyra_MultiVectorStdOps.hpp"
 
@@ -98,12 +99,13 @@ Report build(const std::vector<int>& sizes, const std::vector<Distribution>& d, 
   fillBlocked(Z, [](int j, int r, int c) { return zEntry(j, r, c); });
   fillBlocked(v1, [](int j, int r, int) { return vEntry(j, r); });
   Report report;
-  Teko::KrylovSurrogate::buildReducedOperator(A, Z, v1, kTol, report);
+  Teko::KrylovSurrogate::Impl::buildReducedOperator(A, Z, v1, kTol, report);
   return report;
 }
 
 // Each basis vector is determined up to sign, so C_hat matches the reference
-// entry by entry in magnitude
+// entry by entry in magnitude. That needs distinct singular values, which these
+// samples have.
 void compare(const Report& red, const Reference& ref, Teuchos::FancyOStream& out, bool& success) {
   TEST_ASSERT(red.basisSizes == ref.basisSizes);
   if (red.basisSizes != ref.basisSizes) return;
@@ -133,7 +135,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, matches_dense_reference) {
 
   TEST_ASSERT(red.basisSizes[2] <= sizes[2]);
   TEST_ASSERT(red.rhsCapture > 0.0 && red.rhsCapture <= 1.0 + 1e-12);
-  TEST_ASSERT(red.blockSizes == sizes);
+  TEST_ASSERT(red.blockSizes == std::vector<long long>(sizes.begin(), sizes.end()));
 }
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, any_distribution) {
@@ -176,7 +178,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, resolves_below_gram_floor) {
   fillBlocked(v1, [](int, int r, int) { return 1.0 + 0.1 * r; });
 
   Report red;
-  Teko::KrylovSurrogate::buildReducedOperator(A, Z, v1, kTol, red);
+  Teko::KrylovSurrogate::Impl::buildReducedOperator(A, Z, v1, kTol, red);
   TEST_EQUALITY(red.basisSizes[0], 10);
 }
 
@@ -186,13 +188,36 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, rank_zero_svd) {
   M(0, 0)  = 3.0;
   M(1, 1)  = 2.0;
   M(2, 2)  = 1e-12;
-  auto red = Teko::KrylovSurrogate::reduceOnRankZero(M, 1e-10, *comm);
+  auto red = Teko::KrylovSurrogate::Impl::reduceOnRankZero(M, 1e-10, *comm);
   TEST_EQUALITY(red.size, 2);
   TEST_FLOATING_EQUALITY(red.sigma[0], 3.0, 1e-14);
   TEST_FLOATING_EQUALITY(red.sigma[1], 2.0, 1e-14);
   TEST_EQUALITY(red.U.numRows(), 3);
   TEST_EQUALITY(red.W.numCols(), 2);
 
+  // never more directions than the cap, here a block's dimension
+  M(2, 2) = 1.0;
+  TEST_EQUALITY(Teko::KrylovSurrogate::Impl::reduceOnRankZero(M, 0.0, *comm, 2).size, 2);
+  TEST_EQUALITY(Teko::KrylovSurrogate::Impl::reduceOnRankZero(M, 0.0, *comm).size, 3);
+
   Dense zero(2, 2);
-  TEST_THROW(Teko::KrylovSurrogate::reduceOnRankZero(zero, 1e-10, *comm), std::runtime_error);
+  TEST_THROW(Teko::KrylovSurrogate::Impl::reduceOnRankZero(zero, 1e-10, *comm), std::runtime_error);
+}
+
+TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, non_finite_throws_on_every_rank) {
+  // Samples from a solve that broke down. Only rank 0 looks at them, and every
+  // rank must throw alike: a throw on rank 0 alone would hang the others in the
+  // broadcast, so at several ranks this test would never finish.
+  auto comm = Tpetra::getDefaultComm();
+  Dense M(2, 2);
+  M(0, 0) = 1.0;
+  M(1, 1) = std::numeric_limits<double>::quiet_NaN();
+  TEST_THROW(Teko::KrylovSurrogate::Impl::reduceOnRankZero(M, 1e-10, *comm), std::runtime_error);
+
+  M(1, 1) = std::numeric_limits<double>::infinity();
+  TEST_THROW(Teko::KrylovSurrogate::Impl::reduceOnRankZero(M, 1e-10, *comm), std::runtime_error);
+
+  // and the ranks are still in step afterwards
+  M(1, 1) = 2.0;
+  TEST_EQUALITY(Teko::KrylovSurrogate::Impl::reduceOnRankZero(M, 1e-10, *comm).size, 2);
 }

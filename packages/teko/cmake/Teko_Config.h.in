@@ -3,8 +3,8 @@
 
 #cmakedefine Teko_ENABLE_Amesos2
 
-/* For the Krylov surrogate's search */
-#cmakedefine Teko_ENABLE_Belos
+/* The "Krylov Surrogate" inverse: Tpetra's TSQR and Belos */
+#cmakedefine TEKO_HAVE_KRYLOV_SURROGATE
 
 #cmakedefine HAVE_Teko_ENABLE_Ifpack2
 

@@ -9,9 +9,11 @@
 
 #include "Teko_KrylovSurrogatePreconditionerFactory.hpp"
 
+#include <limits>
 #include <string>
 
 #include "Teuchos_Array.hpp"
+#include "Teuchos_StandardParameterEntryValidators.hpp"
 
 #include "Tpetra_Map.hpp"
 
@@ -27,25 +29,33 @@ namespace {
 
 typedef Teuchos::RCP<Handle> HandlePtr;
 
-// Every option, with its default and documentation. Validating against this
-// makes an unknown or mistyped option an error, so a misspelling does not
-// silently do nothing.
+template <class T>
+Teuchos::RCP<const Teuchos::ParameterEntryValidator> inRange(T lo, T hi) {
+  return Teuchos::rcp(new Teuchos::EnhancedNumberValidator<T>(lo, hi));
+}
+
+// Every option, with its default, documentation and range. Validating against
+// this makes an unknown, mistyped or out-of-range option an error, so a
+// misspelling does not silently do nothing.
 Teuchos::RCP<const Teuchos::ParameterList> validParameters() {
   const Options defaults;
-  auto pl = Teuchos::rcp(new Teuchos::ParameterList);
+  const int big = std::numeric_limits<int>::max();
+  auto pl       = Teuchos::rcp(new Teuchos::ParameterList);
   pl->set("Type", std::string("Krylov Surrogate"), "Selects this preconditioner");
   pl->set("Inverse Factory", std::string(""),
           "The Teko block inverse applied, and recorded (required)");
   pl->set("Report Handle", HandlePtr(),
           "The Teko::KrylovSurrogate::Handle the report is retrieved from (set from code)");
   pl->set("Maximum Samples", defaults.maxSamples,
-          "Columns of preconditioner output kept, each a full-length vector of memory");
+          "Columns of preconditioner output kept, each a full-length vector of memory",
+          inRange(1, big));
   pl->set("Truncation Tolerance", defaults.truncationTol,
-          "Singular values kept per block: sigma_k >= tolerance * sigma_1");
+          "Singular values kept per block: sigma_k >= tolerance * sigma_1", inRange(0.0, 1.0));
   Teuchos::ParameterList& search = pl->sublist("Search", false, "Candidate scoring");
   search.set("Tolerance", defaults.searchTol,
-             "Relative residual each candidate's surrogate solve stops at");
-  search.set("Candidate Count", defaults.candidateCount, "Number of candidates scored");
+             "Relative residual each candidate's surrogate solve stops at", inRange(0.0, 1.0));
+  search.set("Candidate Count", defaults.candidateCount, "Number of candidates scored",
+             inRange(1, big));
   search.set("Seed", defaults.seed, "Seed for sampling candidates");
   search.sublist("Orderings", false, "Orderings always scored, each an Array(int)")
       .disableRecursiveValidation();
@@ -62,21 +72,23 @@ Teuchos::RCP<const Teuchos::ParameterList> validParameters() {
 
 }  // namespace
 
-PreconditionerFactory::PreconditionerFactory() {}
+KrylovSurrogatePreconditionerFactory::KrylovSurrogatePreconditionerFactory() {}
 
-PreconditionerFactory::PreconditionerFactory(const Teuchos::RCP<Teko::InverseFactory>& invFactory,
-                                             const Teuchos::RCP<Handle>& handle,
-                                             const Options& options)
+KrylovSurrogatePreconditionerFactory::KrylovSurrogatePreconditionerFactory(
+    const Teuchos::RCP<Teko::InverseFactory>& invFactory, const Teuchos::RCP<Handle>& handle,
+    const Options& options)
     : invFactory_(invFactory), handle_(handle), options_(options) {}
 
-LinearOp PreconditionerFactory::buildPreconditionerOperator(LinearOp& lo,
-                                                            PreconditionerState& state) const {
+LinearOp KrylovSurrogatePreconditionerFactory::buildPreconditionerOperator(
+    LinearOp& lo, PreconditionerState& state) const {
 #ifndef TEKO_HAVE_KRYLOV_SURROGATE
   (void)lo;
   (void)state;
   TEUCHOS_TEST_FOR_EXCEPTION(true, std::runtime_error,
                              "Teko \"Krylov Surrogate\" requires Tpetra configured with TSQR "
-                             "(Trilinos_ENABLE_TpetraTSQR=ON) and Teko built with Belos");
+                             "and Teko built with Belos: configure with "
+                             "Trilinos_ENABLE_TpetraTSQR=ON and Teko_ENABLE_Belos=ON");
+  return Teuchos::null;
 #else
   TEUCHOS_TEST_FOR_EXCEPTION(invFactory_ == Teuchos::null, std::runtime_error,
                              "Teko \"Krylov Surrogate\": no \"Inverse Factory\" has been set");
@@ -87,11 +99,13 @@ LinearOp PreconditionerFactory::buildPreconditionerOperator(LinearOp& lo,
   TEUCHOS_TEST_FOR_EXCEPTION(blo == Teuchos::null, std::runtime_error,
                              "Teko \"Krylov Surrogate\" needs a blocked operator, one block per "
                              "physics field");
+  // Every block backed by Tpetra, and the user's orderings valid, checked now
+  // rather than at the first report
   const int nb = blockRowCount(blo);
   for (int i = 0; i < nb; ++i)
-    for (int j = 0; j < nb; ++j) tpetraBlock(blo, i, j);  // throws if not Tpetra
+    for (int j = 0; j < nb; ++j) Impl::tpetraBlock(blo, i, j);  // throws if not Tpetra
   for (const auto& o : options_.orderings)
-    TEUCHOS_TEST_FOR_EXCEPTION(!isValidOrdering(o, nb), std::invalid_argument,
+    TEUCHOS_TEST_FOR_EXCEPTION(!Impl::isValidOrdering(o, nb), std::invalid_argument,
                                "Teko \"Krylov Surrogate\": an ordering in \"Orderings\" is not a "
                                "valid ordering of the operator's "
                                    << nb << " blocks");
@@ -106,10 +120,16 @@ LinearOp PreconditionerFactory::buildPreconditionerOperator(LinearOp& lo,
     recorder               = Teuchos::rcp_dynamic_cast<RecorderOp>(recorderOp, true);
     ModifiableLinearOp inv = recorder->getModifiableOp();
     Teko::rebuildInverse(*invFactory_, lo, inv);
-    // Report the solves since the previous build before forgetting them
+    // Report the solves since the previous build before forgetting them. The
+    // report comes from this preconditioner's own recorder, through a private
+    // handle: the shared one may be attached to another preconditioner built
+    // from this factory.
     if (options_.printReport && recorder->numSamples() > 0) {
-      const Report report = handle_->buildReport();
-      if (tpetraBlock(blo, 0, 0)->getRangeMap()->getComm()->getRank() == 0)
+      auto own = Handle::create();
+      own->attach(recorder.getConst(), blo, options_);
+      const Report report = own->buildReport();
+      // Teko's stream prints on rank 0 only, but a user-supplied one may not
+      if (Impl::tpetraBlock(blo, 0, 0)->getRangeMap()->getComm()->getRank() == 0)
         report.print(*Teko::getOutputStream());
     }
     recorder->clearSamples();
@@ -120,7 +140,8 @@ LinearOp PreconditionerFactory::buildPreconditionerOperator(LinearOp& lo,
 #endif
 }
 
-void PreconditionerFactory::initializeFromParameterList(const Teuchos::ParameterList& settings) {
+void KrylovSurrogatePreconditionerFactory::initializeFromParameterList(
+    const Teuchos::ParameterList& settings) {
   Teuchos::ParameterList pl(settings);
   pl.validateParametersAndSetDefaults(*validParameters());
 
@@ -144,8 +165,6 @@ void PreconditionerFactory::initializeFromParameterList(const Teuchos::Parameter
 
   options_.maxSamples    = pl.get<int>("Maximum Samples");
   options_.truncationTol = pl.get<double>("Truncation Tolerance");
-  TEUCHOS_TEST_FOR_EXCEPTION(options_.maxSamples < 1, std::invalid_argument,
-                             "Teko \"Krylov Surrogate\": \"Maximum Samples\" must be at least 1");
 
   const Teuchos::ParameterList& search = pl.sublist("Search");
   options_.searchTol                   = search.get<double>("Tolerance");
@@ -156,7 +175,7 @@ void PreconditionerFactory::initializeFromParameterList(const Teuchos::Parameter
   for (auto it = orderings.begin(); it != orderings.end(); ++it) {
     const std::string& name = orderings.name(it);
     TEUCHOS_TEST_FOR_EXCEPTION(
-        not orderings.isType<Teuchos::Array<int> >(name), std::invalid_argument,
+        !orderings.isType<Teuchos::Array<int> >(name), std::invalid_argument,
         "Teko \"Krylov Surrogate\": ordering \"" << name << "\" must be an Array(int)");
     const Teuchos::Array<int>& o = orderings.get<Teuchos::Array<int> >(name);
     options_.orderings.push_back(std::vector<int>(o.begin(), o.end()));
@@ -164,16 +183,24 @@ void PreconditionerFactory::initializeFromParameterList(const Teuchos::Parameter
 
   invFactory_ = getInverseLibrary()->getInverseFactory(invName);
   TEUCHOS_TEST_FOR_EXCEPTION(invFactory_ == Teuchos::null, std::runtime_error,
-                             "ERROR: \"Inverse Factory\" = " << invName << " could not be found");
+                             "Teko \"Krylov Surrogate\": \"Inverse Factory\" = \""
+                                 << invName << "\" could not be found in the inverse library");
 }
 
-Teuchos::RCP<Teuchos::ParameterList> PreconditionerFactory::getRequestedParameters() const {
+Teuchos::RCP<const Teuchos::ParameterList>
+KrylovSurrogatePreconditionerFactory::getValidParameters() const {
+  return validParameters();
+}
+
+Teuchos::RCP<Teuchos::ParameterList> KrylovSurrogatePreconditionerFactory::getRequestedParameters()
+    const {
   TEUCHOS_TEST_FOR_EXCEPTION(invFactory_ == Teuchos::null, std::runtime_error,
                              "Teko \"Krylov Surrogate\": no \"Inverse Factory\" has been set");
   return invFactory_->getRequestedParameters();
 }
 
-bool PreconditionerFactory::updateRequestedParameters(const Teuchos::ParameterList& pl) {
+bool KrylovSurrogatePreconditionerFactory::updateRequestedParameters(
+    const Teuchos::ParameterList& pl) {
   TEUCHOS_TEST_FOR_EXCEPTION(invFactory_ == Teuchos::null, std::runtime_error,
                              "Teko \"Krylov Surrogate\": no \"Inverse Factory\" has been set");
   return invFactory_->updateRequestedParameters(pl);

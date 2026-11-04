@@ -68,19 +68,38 @@ void writeXml(const Teuchos::ParameterList& pl, const std::string& name, const s
 
 }  // namespace
 
+std::string statusName(Report::Candidate::Status status) {
+  switch (status) {
+    case Report::Candidate::CONVERGED: return "converged";
+    case Report::Candidate::NOT_CONVERGED: return "not converged";
+    case Report::Candidate::SINGULAR_GROUP_BLOCK: return "singular group block";
+    default: return "solver error";
+  }
+}
+
 Teuchos::ParameterList asHierarchicalGaussSeidel(const std::vector<int>& ordering,
                                                  const std::string& inverseType,
                                                  const std::string& mergedInverseType) {
+  const int n = static_cast<int>(ordering.size());
+  TEUCHOS_TEST_FOR_EXCEPTION(!Impl::isValidOrdering(ordering, n), std::invalid_argument,
+                             "Teko::KrylovSurrogate::asHierarchicalGaussSeidel: not a valid "
+                             "ordering of "
+                                 << n << " blocks");
+
   Teuchos::ParameterList pl;
   pl.set("Type", std::string("Hierarchical Block Gauss-Seidel"));
   pl.set("Use Upper Triangle", false);
 
-  const int groups = ordering.empty() ? 0 : *std::max_element(ordering.begin(), ordering.end()) + 1;
+  const int groups = *std::max_element(ordering.begin(), ordering.end()) + 1;
   for (int g = 0; g < groups; ++g) {
     std::ostringstream blocks;
     int members = 0;
-    for (std::size_t k = 0; k < ordering.size(); ++k)
-      if (ordering[k] == g) blocks << (members++ ? "," : "") << k + 1;
+    for (int k = 0; k < n; ++k) {
+      if (ordering[k] != g) continue;
+      if (members > 0) blocks << ",";
+      blocks << k + 1;
+      ++members;
+    }
 
     Teuchos::ParameterList& group = pl.sublist("Hierarchical Block " + std::to_string(g + 1));
     group.set("Included Subblocks", blocks.str());
@@ -97,7 +116,7 @@ Teuchos::RCP<Teuchos::ParameterList> Report::toParameterList() const {
   auto pl = Teuchos::rcp(new Teuchos::ParameterList("Krylov Surrogate Report"));
   pl->set("Number of Blocks", numBlocks);
   pl->set("Number of Samples", numSamples);
-  pl->set("Block Sizes", Teuchos::Array<int>(blockSizes));
+  pl->set("Block Sizes", Teuchos::Array<long long>(blockSizes));
   pl->set("Basis Sizes", Teuchos::Array<int>(basisSizes));
 
   Teuchos::TwoDArray<double> C(CHat.numRows(), CHat.numCols());
@@ -114,7 +133,7 @@ Teuchos::RCP<Teuchos::ParameterList> Report::toParameterList() const {
   for (std::size_t c = 0; c < candidates.size(); ++c) {
     Teuchos::ParameterList& one = cl.sublist("Candidate " + std::to_string(c));
     one.set("Ordering", Teuchos::Array<int>(candidates[c].ordering));
-    one.set("Status", candidates[c].status);
+    one.set("Status", statusName(candidates[c].status));
     one.set("Iterations", candidates[c].iterations);
     one.set("Final Relative Residual", candidates[c].finalRelativeResidual);
     one.set("Rate", candidates[c].rate);
@@ -124,7 +143,7 @@ Teuchos::RCP<Teuchos::ParameterList> Report::toParameterList() const {
 }
 
 void Report::print(std::ostream& os, int maxCandidates) const {
-  auto list = [](const std::vector<int>& v) {
+  auto list = [](const auto& v) {
     std::ostringstream ss;
     for (std::size_t i = 0; i < v.size(); ++i) ss << (i ? " " : "") << v[i];
     return ss.str();
@@ -133,43 +152,67 @@ void Report::print(std::ostream& os, int maxCandidates) const {
       diagonalDeviations.empty()
           ? 0.0
           : *std::max_element(diagonalDeviations.begin(), diagonalDeviations.end());
+  const int shown   = std::min<int>(maxCandidates, candidates.size());
+  std::size_t width = std::string("ordering").size();
+  for (int c = 0; c < shown; ++c) width = std::max(width, list(candidates[c].ordering).size() + 2);
+  width += 2;
 
-  os << "Teko Krylov Surrogate report: " << numBlocks << " blocks (sizes " << list(blockSizes)
+  // formatted in a local stream, so the caller's flags and precision are untouched
+  std::ostringstream ss;
+  ss << "Teko Krylov Surrogate report: " << numBlocks << " blocks (sizes " << list(blockSizes)
      << "), " << numSamples << " samples, basis sizes " << list(basisSizes) << "\n"
      << "  rhs capture " << rhsCapture << ", max diagonal deviation " << deviation << ", "
      << candidates.size() << " candidates scored on " << searchRanks << " ranks\n"
-     << "  " << std::left << std::setw(20) << "ordering" << std::setw(22) << "status"
+     << "  " << std::left << std::setw(width) << "ordering" << std::setw(22) << "status"
      << std::setw(12) << "iterations"
      << "rate\n";
-  const int shown = std::min<int>(maxCandidates, candidates.size());
   for (int c = 0; c < shown; ++c)
-    os << "  " << std::setw(20) << "[" + list(candidates[c].ordering) + "]" << std::setw(22)
-       << candidates[c].status << std::setw(12) << candidates[c].iterations << candidates[c].rate
+    ss << "  " << std::setw(width) << "[" + list(candidates[c].ordering) + "]" << std::setw(22)
+       << statusName(candidates[c].status) << std::setw(12) << candidates[c].iterations
+       << std::scientific << std::setprecision(3) << candidates[c].rate << std::defaultfloat
        << "\n";
-  os << std::right;
   if (!candidates.empty()) {
-    os << "  best, as a Teko inverse library entry:\n";
-    writeXml(candidates[0].asHierarchicalGaussSeidel, "Krylov Surrogate Best", "  ", os);
+    if (candidates[0].status != Report::Candidate::CONVERGED)
+      ss << "  no candidate converged on the surrogate\n";
+    ss << "  best, as a Teko inverse library entry:\n";
+    writeXml(candidates[0].asHierarchicalGaussSeidel, "Krylov Surrogate Best", "  ", ss);
   }
+  os << ss.str();
 }
 
 Teuchos::RCP<Handle> Handle::create() { return Teuchos::rcp(new Handle); }
 
 void Handle::attach(const Teuchos::RCP<const RecorderOp>& recorder, const BlockedLinearOp& A,
                     const Options& options) {
-  recorder_ = recorder;
-  A_        = A;
+  recorder_ = recorder.create_weak();
+  A_        = A.create_weak();
   options_  = options;
+}
+
+bool Handle::isAttached() const {
+  return !recorder_.is_null() && recorder_.is_valid_ptr() && A_.is_valid_ptr();
+}
+
+Teuchos::RCP<const RecorderOp> Handle::getRecorder() const {
+  return isAttached() ? recorder_.create_strong() : Teuchos::null;
 }
 
 Report Handle::buildReport() const {
   TEUCHOS_TEST_FOR_EXCEPTION(
-      !isAttached(), std::runtime_error,
+      recorder_.is_null(), std::runtime_error,
       "Teko::KrylovSurrogate::Handle::buildReport: no preconditioner has been built from the "
       "\"Krylov Surrogate\" sublist holding this handle. Build it, solve, then ask for the "
       "report.");
   TEUCHOS_TEST_FOR_EXCEPTION(
-      recorder_->numSamples() == 0, std::runtime_error,
+      !isAttached(), std::runtime_error,
+      "Teko::KrylovSurrogate::Handle::buildReport: the preconditioner (or its operator) this "
+      "handle was attached to no longer exists. The handle holds only weak references, so ask "
+      "for the report before the preconditioner is destroyed.");
+  // strong for the duration of the build
+  const Teuchos::RCP<const RecorderOp> recorder = recorder_.create_strong();
+  const BlockedLinearOp A                       = A_.create_strong();
+  TEUCHOS_TEST_FOR_EXCEPTION(
+      recorder->numSamples() == 0, std::runtime_error,
       "Teko::KrylovSurrogate::Handle::buildReport: the preconditioner has not been applied since "
       "it was last built, so there are no samples. Solve first.");
 
@@ -180,20 +223,22 @@ Report Handle::buildReport() const {
       Teuchos::TimeMonitor::getNewCounter("Teko Krylov Surrogate: Search");
 
   Report report;
-  report.numSamples = recorder_->numSamples();
+  report.numSamples = recorder->numSamples();
   {
     Teuchos::TimeMonitor monitor(*buildTimer);
-    buildReducedOperator(A_, recorder_->getSamples(), recorder_->getFirstInput(),
-                         options_.truncationTol, report);
+    Impl::buildReducedOperator(A, recorder->getSamples(), recorder->getFirstInput(),
+                               options_.truncationTol, report);
   }
 
-  auto comm = tpetraBlock(A_, 0, 0)->getRangeMap()->getComm();
+  // block (0, 0) is nonzero: buildReducedOperator rejects a zero diagonal block
+  auto comm = Impl::tpetraBlock(A, 0, 0)->getRangeMap()->getComm();
   {
     Teuchos::TimeMonitor monitor(*searchTimer);
-    report.candidates = scoreCandidates(report.CHat, report.bHat, report.basisSizes,
-                                        buildCandidates(report.numBlocks, options_.orderings,
-                                                        options_.candidateCount, options_.seed),
-                                        options_.searchTol, *comm);
+    report.candidates =
+        Impl::scoreCandidates(report.CHat, report.bHat, report.basisSizes,
+                              Impl::buildCandidates(report.numBlocks, options_.orderings,
+                                                    options_.candidateCount, options_.seed),
+                              options_.searchTol, *comm);
   }
   for (auto& c : report.candidates)
     c.asHierarchicalGaussSeidel =
@@ -202,6 +247,10 @@ Report Handle::buildReport() const {
   return report;
 #else
   // unreachable: without the surrogate the factory throws before attaching
+  (void)A;
+  TEUCHOS_TEST_FOR_EXCEPTION(true, std::logic_error,
+                             "Teko::KrylovSurrogate::Handle::buildReport: Teko was built without "
+                             "the Krylov surrogate");
   return Report();
 #endif
 }

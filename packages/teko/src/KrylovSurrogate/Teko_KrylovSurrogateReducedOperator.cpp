@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 
 #include "Teuchos_CommHelpers.hpp"
@@ -27,6 +28,7 @@
 
 namespace Teko {
 namespace KrylovSurrogate {
+namespace Impl {
 
 namespace {
 
@@ -65,7 +67,8 @@ Teuchos::RCP<TpetraMV> tpetraOfBlock(const MultiVector& mv, int j) {
 
 }  // namespace
 
-BlockReduction reduceOnRankZero(const DenseMatrix& M, double tol, const Teuchos::Comm<int>& comm) {
+BlockReduction reduceOnRankZero(const DenseMatrix& M, double tol, const Teuchos::Comm<int>& comm,
+                                int maxSize) {
   const int k = M.numRows();
   const int m = M.numCols();
   const int s = std::min(k, m);
@@ -74,27 +77,47 @@ BlockReduction reduceOnRankZero(const DenseMatrix& M, double tol, const Teuchos:
   std::vector<double> sigma(s, 0.0);
   DenseMatrix U(k, s), VT(s, m);
 
+  // Rank 0 decides, and every rank throws alike from what it broadcasts: a
+  // throw on rank 0 alone would leave the others waiting in the broadcast.
+  enum { OK = 0, NOT_FINITE = 1, SVD_FAILED = 2 };
+  int verdict[3] = {0, OK, 0};  // size, status, LAPACK info
   if (comm.getRank() == 0) {
-    Teuchos::LAPACK<int, double> lapack;
-    DenseMatrix A(M);  // GESVD overwrites its input
-    int info = 0, lwork = -1;
-    double query;
-    lapack.GESVD('S', 'S', k, m, A.values(), A.stride(), sigma.data(), U.values(), U.stride(),
-                 VT.values(), VT.stride(), &query, lwork, nullptr, &info);
-    lwork = static_cast<int>(query);
-    std::vector<double> work(lwork);
-    lapack.GESVD('S', 'S', k, m, A.values(), A.stride(), sigma.data(), U.values(), U.stride(),
-                 VT.values(), VT.stride(), work.data(), lwork, nullptr, &info);
-    TEUCHOS_TEST_FOR_EXCEPTION(
-        info != 0, std::runtime_error,
-        "Teko::KrylovSurrogate::reduceOnRankZero: GESVD failed, info = " << info);
+    bool finite = true;
+    for (int j = 0; j < m; ++j)
+      for (int i = 0; i < k; ++i) finite = finite && std::isfinite(M(i, j));
 
-    red.size = 0;
-    while (red.size < s && sigma[red.size] >= tol * sigma[0] && sigma[red.size] > 0.0) ++red.size;
-    red.size = std::max(red.size, 1);
+    if (!finite) {
+      verdict[1] = NOT_FINITE;
+    } else {
+      Teuchos::LAPACK<int, double> lapack;
+      DenseMatrix A(M);  // GESVD overwrites its input
+      int info = 0, lwork = -1;
+      double query;
+      lapack.GESVD('S', 'S', k, m, A.values(), A.stride(), sigma.data(), U.values(), U.stride(),
+                   VT.values(), VT.stride(), &query, lwork, nullptr, &info);
+      lwork = static_cast<int>(query);
+      std::vector<double> work(lwork);
+      lapack.GESVD('S', 'S', k, m, A.values(), A.stride(), sigma.data(), U.values(), U.stride(),
+                   VT.values(), VT.stride(), work.data(), lwork, nullptr, &info);
+      verdict[2] = info;
+      if (info != 0) verdict[1] = SVD_FAILED;
+    }
+
+    int size      = 0;
+    const int cap = std::min(s, std::max(maxSize, 1));
+    while (verdict[1] == OK && size < cap && sigma[size] >= tol * sigma[0] && sigma[size] > 0.0)
+      ++size;
+    verdict[0] = std::max(size, 1);
   }
 
-  Teuchos::broadcast<int, int>(comm, 0, 1, &red.size);
+  Teuchos::broadcast<int, int>(comm, 0, 3, verdict);
+  TEUCHOS_TEST_FOR_EXCEPTION(verdict[1] == NOT_FINITE, std::runtime_error,
+                             "Teko::KrylovSurrogate::reduceOnRankZero: a block's samples contain "
+                             "a NaN or an infinity, so it has no reduced basis");
+  TEUCHOS_TEST_FOR_EXCEPTION(
+      verdict[1] == SVD_FAILED, std::runtime_error,
+      "Teko::KrylovSurrogate::reduceOnRankZero: GESVD failed, info = " << verdict[2]);
+  red.size    = verdict[0];
   const int r = red.size;
 
   red.sigma.assign(r, 0.0);
@@ -132,14 +155,14 @@ Teuchos::RCP<const Tpetra::Operator<ST, LO, GO, NT> > tpetraBlock(const BlockedL
 }
 
 void buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z, const MultiVector& v1,
-                          double truncationTol, Report& out) {
+                          double truncationTol, Report& report) {
   const int nb = blockRowCount(A);
   const int m  = static_cast<int>(Z->domain()->dim());
 
-  out.numBlocks = nb;
-  out.blockSizes.resize(nb);
-  out.basisSizes.resize(nb);
-  out.diagonalDeviations.resize(nb);
+  report.numBlocks = nb;
+  report.blockSizes.resize(nb);
+  report.basisSizes.resize(nb);
+  report.diagonalDeviations.resize(nb);
 
   // every block as a Tpetra operator, null for a zero block, fetched once
   std::vector<std::vector<TpetraOp> > blocks(nb, std::vector<TpetraOp>(nb));
@@ -154,14 +177,17 @@ void buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z, const 
     TEUCHOS_TEST_FOR_EXCEPTION(Ajj == Teuchos::null, std::runtime_error,
                                "Teko \"Krylov Surrogate\": diagonal block "
                                    << j << " is zero, so the surrogate is undefined");
-    auto Zj           = tpetraOfBlock(Z, j);
-    auto range        = Ajj->getRangeMap();
-    comm              = range->getComm();
-    out.blockSizes[j] = static_cast<int>(range->getGlobalNumElements());
+    auto Zj    = tpetraOfBlock(Z, j);
+    auto range = Ajj->getRangeMap();
+    // every block on the same ranks, as Teko assumes throughout
+    TEUCHOS_ASSERT(comm == Teuchos::null || comm->getSize() == range->getComm()->getSize());
+    comm                 = range->getComm();
+    report.blockSizes[j] = static_cast<long long>(range->getGlobalNumElements());
 
     // V_tilde_j = A_jj Z_j, computed straight into the top rows of a work
     // multivector padded with zero rows to at least m rows on every rank. TSQR
-    // needs that many local rows, and zero rows leave R unchanged.
+    // needs that many local rows, and zero rows leave R unchanged. The view onto
+    // the block's own map works because Tpetra checks only the local length.
     const size_t nLocal = range->getLocalNumElements();
     const size_t nWork  = std::max(nLocal, static_cast<size_t>(m));
     auto workMap        = Teuchos::rcp(
@@ -174,9 +200,12 @@ void buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z, const 
     Tpetra::TsqrAdaptor<TpetraMV> tsqr;
     tsqr.factorExplicit(work, Q, R);
 
-    BlockReduction red = reduceOnRankZero(R, truncationTol, *comm);
-    const int r        = red.size;
-    out.basisSizes[j]  = r;
+    // at most n_j directions: a block has no more, whatever the roundoff
+    const int cap = static_cast<int>(
+        std::min<long long>(report.blockSizes[j], std::numeric_limits<int>::max()));
+    BlockReduction red   = reduceOnRankZero(R, truncationTol, *comm, cap);
+    const int r          = red.size;
+    report.basisSizes[j] = r;
 
     // Q_hat_j = Q_j U_j, keeping only the block's own rows
     TpetraMV QU(workMap, r);
@@ -192,57 +221,58 @@ void buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z, const 
   }
 
   std::vector<int> offset(nb + 1, 0);
-  for (int j = 0; j < nb; ++j) offset[j + 1] = offset[j] + out.basisSizes[j];
+  for (int j = 0; j < nb; ++j) offset[j + 1] = offset[j] + report.basisSizes[j];
   const int R = offset[nb];
 
   // C_hat_ij = Q_hat_i^T A_ij Y_j. The diagonal blocks are computed by the same
   // loop: in exact arithmetic they are I, so their deviation is the roundoff
   // actually incurred.
-  out.CHat.shape(R, R);
+  report.CHat.shape(R, R);
   for (int i = 0; i < nb; ++i) {
     for (int j = 0; j < nb; ++j) {
       if (blocks[i][j] == Teuchos::null) continue;
 
-      TpetraMV AY(blocks[i][j]->getRangeMap(), out.basisSizes[j]);
+      TpetraMV AY(blocks[i][j]->getRangeMap(), report.basisSizes[j]);
       blocks[i][j]->apply(*Y[j], AY);
       DenseMatrix Cij = transposeProduct(*Qhat[i], AY);
 
       double deviation = 0.0;
-      for (int c = 0; c < out.basisSizes[j]; ++c) {
-        for (int rr = 0; rr < out.basisSizes[i]; ++rr) {
+      for (int c = 0; c < report.basisSizes[j]; ++c) {
+        for (int rr = 0; rr < report.basisSizes[i]; ++rr) {
           if (i == j) {
             deviation  = std::max(deviation, std::abs(Cij(rr, c) - (rr == c ? 1.0 : 0.0)));
             Cij(rr, c) = (rr == c ? 1.0 : 0.0);
           }
-          out.CHat(offset[i] + rr, offset[j] + c) = Cij(rr, c);
+          report.CHat(offset[i] + rr, offset[j] + c) = Cij(rr, c);
         }
       }
-      if (i == j) out.diagonalDeviations[i] = deviation;
+      if (i == j) report.diagonalDeviations[i] = deviation;
     }
   }
 
   // b_hat_j = Q_hat_j^T v1_j, and how much of v1 the trained subspace captures
-  out.bHat.size(R);
+  report.bHat.size(R);
   double v1NormSq = 0.0;
   for (int j = 0; j < nb; ++j) {
     auto v1j       = tpetraOfBlock(v1, j);
     DenseMatrix bj = transposeProduct(*Qhat[j], *v1j);
-    for (int rr = 0; rr < out.basisSizes[j]; ++rr) out.bHat(offset[j] + rr) = bj(rr, 0);
+    for (int rr = 0; rr < report.basisSizes[j]; ++rr) report.bHat(offset[j] + rr) = bj(rr, 0);
 
     Teuchos::Array<double> norm(1);
     v1j->norm2(norm());
     v1NormSq += norm[0] * norm[0];
   }
-  out.rhsCapture = (v1NormSq > 0.0) ? out.bHat.normFrobenius() / std::sqrt(v1NormSq) : 0.0;
+  report.rhsCapture = (v1NormSq > 0.0) ? report.bHat.normFrobenius() / std::sqrt(v1NormSq) : 0.0;
 
   // Every rank holds the same numbers up to the bits of each reduction. Take
   // rank 0's, so everything downstream is bitwise identical across ranks.
-  Teuchos::broadcast<int, double>(*comm, 0, R * R, out.CHat.values());
-  Teuchos::broadcast<int, double>(*comm, 0, R, out.bHat.values());
-  Teuchos::broadcast<int, double>(*comm, 0, nb, out.diagonalDeviations.data());
-  Teuchos::broadcast<int, double>(*comm, 0, 1, &out.rhsCapture);
+  Teuchos::broadcast<int, double>(*comm, 0, R * R, report.CHat.values());
+  Teuchos::broadcast<int, double>(*comm, 0, R, report.bHat.values());
+  Teuchos::broadcast<int, double>(*comm, 0, nb, report.diagonalDeviations.data());
+  Teuchos::broadcast<int, double>(*comm, 0, 1, &report.rhsCapture);
 }
 
+}  // namespace Impl
 }  // namespace KrylovSurrogate
 }  // end namespace Teko
 

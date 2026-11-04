@@ -11,11 +11,16 @@
  *
  * Builds the Krylov surrogate's reduced operator \f$\hat{C}\f$ and right-hand
  * side \f$\hat{b}\f$ from recorded preconditioner outputs.
+ *
+ * Implementation detail of the "Krylov Surrogate" inverse, not user API: the
+ * declarations are in Teko::KrylovSurrogate::Impl and may change without notice.
+ * The user API is Teko_KrylovSurrogateReport.hpp.
  */
 
 #ifndef __Teko_KrylovSurrogateReducedOperator_hpp__
 #define __Teko_KrylovSurrogateReducedOperator_hpp__
 
+#include <limits>
 #include <vector>
 
 #include "Teuchos_Comm.hpp"
@@ -30,9 +35,12 @@
 
 namespace Teko {
 namespace KrylovSurrogate {
+namespace Impl {
 
 typedef Teuchos::SerialDenseMatrix<int, double> DenseMatrix;
 typedef Teuchos::SerialDenseVector<int, double> DenseVector;
+
+#ifdef TEKO_HAVE_KRYLOV_SURROGATE
 
 /** \brief Truncated SVD \f$M \approx U \Sigma W^T\f$ of one block's small factor. */
 struct BlockReduction {
@@ -43,14 +51,16 @@ struct BlockReduction {
 };
 
 /** \brief SVD of a small dense \f$k \times m\f$ matrix on rank 0, truncated at
- *         \f$\sigma_i \ge tol \cdot \sigma_1\f$ (keeping at least one direction),
- *         and broadcast to every rank.
+ *         \f$\sigma_i \ge tol \cdot \sigma_1\f$ and to at most maxSize directions
+ *         (keeping at least one), and broadcast to every rank.
  *
  * Only rank 0's M is used. Running the SVD once and broadcasting it guarantees
  * every rank agrees on how many directions to keep, which a redundant SVD
- * cannot.
+ * cannot. A non-finite M, a failed SVD, or an all-zero M throws on every rank
+ * alike, never on rank 0 alone.
  */
-BlockReduction reduceOnRankZero(const DenseMatrix& M, double tol, const Teuchos::Comm<int>& comm);
+BlockReduction reduceOnRankZero(const DenseMatrix& M, double tol, const Teuchos::Comm<int>& comm,
+                                int maxSize = std::numeric_limits<int>::max());
 
 /** \brief Block (i, j) of A as a Tpetra operator, or null for a zero block.
  *
@@ -65,7 +75,8 @@ Teuchos::RCP<const Tpetra::Operator<ST, LO, GO, NT> > tpetraBlock(const BlockedL
  *
  * For each block j: \f$\tilde{V}_j = A_{jj} Z_j\f$, a tall-skinny QR
  * \f$\tilde{V}_j = Q_j R_j\f$ (padded with zero rows on any rank holding fewer
- * than m rows), the truncated SVD \f$R_j = U_j \Sigma_j W_j^T\f$ on rank 0,
+ * than m rows), the truncated SVD \f$R_j = U_j \Sigma_j W_j^T\f$ on rank 0 (at
+ * most \f$n_j\f$ directions, the block's dimension),
  * \f$\hat{Q}_j = Q_j U_j\f$ and \f$Y_j = Z_j W_j \Sigma_j^{-1} = A_{jj}^{-1} \hat{Q}_j\f$.
  * Then \f$\hat{C}_{ij} = \hat{Q}_i^T A_{ij} Y_j\f$ and \f$\hat{b}_j = \hat{Q}_j^T v_{1,j}\f$.
  * The diagonal blocks are computed, their distance from I recorded, and then
@@ -81,6 +92,9 @@ Teuchos::RCP<const Tpetra::Operator<ST, LO, GO, NT> > tpetraBlock(const BlockedL
 void buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z, const MultiVector& v1,
                           double truncationTol, Report& report);
 
+#endif  // TEKO_HAVE_KRYLOV_SURROGATE
+
+}  // namespace Impl
 }  // namespace KrylovSurrogate
 }  // end namespace Teko
 

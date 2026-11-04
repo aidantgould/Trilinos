@@ -28,9 +28,19 @@ namespace KrylovSurrogate {
  * Every output is a valid sample of the diagonal-block inverses: with
  * \f$\tilde{V}_j := A_{jj} Z_j\f$, \f$A_{jj}^{-1} \tilde{V}_j = Z_j\f$ holds exactly
  * whatever produced \f$Z\f$. Recording stops once maxSamples columns are kept.
- * The first input after a clear is, in right-preconditioned GMRES, the
- * direction of the initial residual, which becomes the surrogate's right-hand
- * side.
+ * The store starts small and doubles up to maxSamples as samples arrive.
+ *
+ * The first input after a clear becomes the surrogate's right-hand side. That
+ * relies on how Belos's GMRES applies a right preconditioner:
+ * - the first apply is on \f$v_1 = r_0 / \|r_0\|\f$;
+ * - with a block size above one, only column 0 is kept, so the right-hand side is
+ *   the first system's;
+ * - a non-flexible GMRES also applies the preconditioner to \f$V y\f$ at each
+ *   restart. Those outputs are recorded too: they are valid samples of the
+ *   diagonal-block inverses, though not Krylov vectors.
+ *
+ * The recorded state is mutable and written in a const apply, so the operator is
+ * not thread-safe, as Thyra operators are generally not.
  */
 class RecorderOp : public ImplicitLinearOp {
  public:
@@ -49,7 +59,8 @@ class RecorderOp : public ImplicitLinearOp {
   //! The wrapped preconditioner, for rebuilding it in place
   ModifiableLinearOp getModifiableOp() const { return prec_; }
 
-  //! Forget every recorded sample and the first input
+  //! Forget every recorded sample and the first input. The store stays
+  //! allocated, for the next solve after a rebuild.
   void clearSamples();
 
   //! Number of recorded columns
@@ -66,6 +77,8 @@ class RecorderOp : public ImplicitLinearOp {
 
  private:
   void record(const MultiVector& z) const;
+
+  static constexpr int kInitialCapacity = 16;
 
   ModifiableLinearOp prec_;
   int maxSamples_;

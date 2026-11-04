@@ -14,6 +14,7 @@
 #ifndef __tKrylovSurrogateProblem_hpp__
 #define __tKrylovSurrogateProblem_hpp__
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -42,7 +43,7 @@ typedef Teuchos::SerialDenseMatrix<int, double> Dense;
 
 // Block (i, j) entry at (r, c), or 0. Diagonal blocks are diagonally dominant;
 // block (0, 2) is structurally zero.
-inline double entry(int i, int j, int r, int c, int ni, int nj) {
+inline double entry(int i, int j, int r, int c, int nj) {
   if (i == j) {
     if (r == c) return 4.0 + 0.1 * i + 0.01 * r;
     if (c == r - 1 || c == r + 1) return -1.0;
@@ -51,7 +52,6 @@ inline double entry(int i, int j, int r, int c, int ni, int nj) {
   }
   if (i == 0 && j == 2) return 0.0;
   if (c == (3 * r + i + 2 * j) % nj) return 0.6 * std::sin(r + 2.0 * i + 3.0 * j + 1.0);
-  (void)ni;
   return 0.0;
 }
 
@@ -92,7 +92,7 @@ inline Teko::BlockedLinearOp buildBlockedOp(const std::vector<int>& sizes,
         std::vector<GO> cols;
         std::vector<ST> vals;
         for (int c = 0; c < sizes[j]; ++c) {
-          const double v = entry(i, j, static_cast<int>(r), c, sizes[i], sizes[j]);
+          const double v = entry(i, j, static_cast<int>(r), c, sizes[j]);
           if (v != 0.0) {
             cols.push_back(c);
             vals.push_back(v);
@@ -130,7 +130,7 @@ void fillBlocked(const Teko::MultiVector& mv, F f) {
 inline Dense denseBlock(const std::vector<int>& sizes, int i, int j) {
   Dense A(sizes[i], sizes[j]);
   for (int r = 0; r < sizes[i]; ++r)
-    for (int c = 0; c < sizes[j]; ++c) A(r, c) = entry(i, j, r, c, sizes[i], sizes[j]);
+    for (int c = 0; c < sizes[j]; ++c) A(r, c) = entry(i, j, r, c, sizes[j]);
   return A;
 }
 

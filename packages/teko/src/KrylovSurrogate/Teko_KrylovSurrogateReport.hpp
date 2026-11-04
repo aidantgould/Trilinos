@@ -25,24 +25,22 @@
 #include "Teuchos_SerialDenseMatrix.hpp"
 #include "Teuchos_SerialDenseVector.hpp"
 
-#include "TpetraCore_config.h"
-
+// Teko_Config.h defines TEKO_HAVE_KRYLOV_SURROGATE when Tpetra has TSQR and Teko
+// has Belos. Without it, "Krylov Surrogate" is still registered, but building it
+// throws, saying what is missing.
 #include "Teko_Config.h"
 #include "Teko_Utilities.hpp"
-
-// The Krylov surrogate needs Tpetra's TSQR for its bases and Belos for its
-// search. Without either, "Krylov Surrogate" is still registered, but building
-// it throws, saying what is missing.
-#if defined(HAVE_TPETRA_TSQR) && defined(Teko_ENABLE_Belos)
-#define TEKO_HAVE_KRYLOV_SURROGATE
-#endif
 
 namespace Teko {
 namespace KrylovSurrogate {
 
 class RecorderOp;
+class KrylovSurrogatePreconditionerFactory;
 
 /** \brief Options of a "Krylov Surrogate" inverse, read from its parameter list.
+ *
+ * The factory's parsed parameter list. It lives in this header because the
+ * handle keeps a copy, to build the report with the same options.
  */
 struct Options {
   //! Columns of preconditioner output kept for the surrogate
@@ -59,9 +57,11 @@ struct Options {
   std::vector<std::vector<int> > orderings;
   //! Print a summary to Teko's output stream at each rebuild
   bool printReport = false;
-  //! Inverses named in the candidates' Hierarchical Block Gauss-Seidel lists:
-  //! for single-block groups, and for merged groups (which get a blocked operator)
-  std::string inverseType, mergedInverseType;
+  //! Inverse named for single-block groups in the candidates' Hierarchical Block
+  //! Gauss-Seidel lists
+  std::string inverseType;
+  //! Inverse named for merged groups in those lists; it receives a blocked operator
+  std::string mergedInverseType;
 };
 
 /** \brief An ordering as a Teko "Hierarchical Block Gauss-Seidel" parameter list,
@@ -70,7 +70,13 @@ struct Options {
  * Group g becomes "Hierarchical Block g+1", holding its blocks (numbered from 1)
  * and an inverse: inverseType for a single block, mergedInverseType for a merged
  * group. The sweep is lower triangular, as the surrogate scored it. An empty
- * name is written as a placeholder to fill in.
+ * name is written as a placeholder to fill in. The ordering must be valid.
+ *
+ * The surrogate scores a configuration with exact solves: of each single block,
+ * and of each merged group's whole block. The list means what was scored only
+ * when both inverses are direct (or iterative to a tight tolerance). A merged
+ * inverse that is itself an approximation, such as a block Gauss-Seidel sweep
+ * inside the group, is a different preconditioner from the one predicted.
  */
 Teuchos::ParameterList asHierarchicalGaussSeidel(const std::vector<int>& ordering,
                                                  const std::string& inverseType,
@@ -86,11 +92,19 @@ Teuchos::ParameterList asHierarchicalGaussSeidel(const std::vector<int>& orderin
  */
 struct Report {
   struct Candidate {
+    //! How a candidate's surrogate solve ended, best first
+    enum Status {
+      CONVERGED            = 0,
+      NOT_CONVERGED        = 1,  //!< Belos stopped short: iteration limit or loss of accuracy
+      SINGULAR_GROUP_BLOCK = 2,  //!< a merged group's block of \f$\hat{C}\f$ is singular
+      SOLVER_ERROR         = 3   //!< the solve threw
+    };
+
     std::vector<int> ordering;
-    //! "converged", "max iterations", "singular group block" or "solver error"
-    std::string status;
+    Status status  = SOLVER_ERROR;
     int iterations = 0;
-    //! \f$\|\hat{b} - K y\| / \|\hat{b}\|\f$ at the end of the surrogate solve
+    //! \f$\|\hat{b} - K y\| / \|\hat{b}\|\f$ at the end of the surrogate solve, as
+    //! Belos reports it
     double finalRelativeResidual = 0.0;
     //! finalRelativeResidual^(1/iterations), the average reduction per iteration
     double rate = 0.0;
@@ -100,7 +114,8 @@ struct Report {
 
   int numBlocks  = 0;
   int numSamples = 0;
-  std::vector<int> blockSizes;
+  //! Global rows per block
+  std::vector<long long> blockSizes;
   //! Directions retained per block, \f$r_j\f$
   std::vector<int> basisSizes;
   Teuchos::SerialDenseMatrix<int, double> CHat;
@@ -122,6 +137,9 @@ struct Report {
   void print(std::ostream& os, int maxCandidates = 10) const;
 };
 
+//! "converged", "not converged", "singular group block" or "solver error"
+std::string statusName(Report::Candidate::Status status);
+
 /** \brief Collects the surrogate report of a "Krylov Surrogate" inverse.
  *
  * Create one, put it in the inverse's parameter list as "Report Handle", build
@@ -138,10 +156,19 @@ struct Report {
  \endcode
  *
  * The handle refers to the preconditioner most recently built or rebuilt from
- * that sublist, and keeps it and its operator alive. The report describes the
- * solves since that build. Its right-hand side is the direction of the first
- * vector the preconditioner was applied to, which in right-preconditioned
- * GMRES is the initial residual, so warm-started solves are handled as such.
+ * that sublist. The report describes the solves since that build. Its
+ * right-hand side is the direction of the first vector the preconditioner was
+ * applied to, which in right-preconditioned GMRES is the initial residual, so
+ * warm-started solves are handled as such.
+ *
+ * The handle holds only weak references to the preconditioner and its
+ * operator, so the parameter list (and every copy of it) does not keep the
+ * recorded samples alive. Ask for the report while the preconditioner still
+ * exists: afterwards buildReport() throws.
+ *
+ * A parameter list holding a handle can be written to XML, but the handle is
+ * written as a pointer, and reading that file back throws. Remove "Report
+ * Handle" before echoing an input deck.
  */
 class Handle {
  public:
@@ -154,21 +181,23 @@ class Handle {
    */
   Report buildReport() const;
 
-  //! Called by the factory on every build; not for users
+  //! Whether a preconditioner has been attached and still exists
+  bool isAttached() const;
+
+  //! The recorder of the attached preconditioner (null if none), a diagnostic
+  Teuchos::RCP<const RecorderOp> getRecorder() const;
+
+ private:
+  // Shared through RCP only, so no stack instances
+  Handle() = default;
+
+  // Called by the factory on every build
+  friend class KrylovSurrogatePreconditionerFactory;
   void attach(const Teuchos::RCP<const RecorderOp>& recorder, const BlockedLinearOp& A,
               const Options& options);
 
-  //! Whether a preconditioner has been attached
-  bool isAttached() const { return recorder_ != Teuchos::null; }
-
-  //! The recorder of the attached preconditioner (null if none), mainly for testing
-  Teuchos::RCP<const RecorderOp> getRecorder() const { return recorder_; }
-
- private:
-  Handle() = default;
-
-  Teuchos::RCP<const RecorderOp> recorder_;
-  BlockedLinearOp A_;
+  Teuchos::RCP<const RecorderOp> recorder_;  // weak
+  BlockedLinearOp A_;                        // weak
   Options options_;
 };
 
