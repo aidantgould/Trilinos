@@ -10,5 +10,5 @@ upstream PR.
 - `teko_auto_parity/` (when it exists): comparisons against the research hack
   (`aidantgould/teko-reconfig-request`) and pyautoteko. Code is tracked, run data is not.
 
-The shipped code lives in `packages/teko/src/Teko_KrylovSurrogate*` and its tests in
+The shipped code lives in `packages/teko/src/KrylovSurrogate/` and its tests in
 `packages/teko/tests/unit_tests/tKrylovSurrogate*.cpp`.
