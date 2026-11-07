@@ -18,6 +18,7 @@
 #ifdef TEKO_HAVE_KRYLOV_SURROGATE
 #include "Teuchos_CommHelpers.hpp"
 #include "Teuchos_SerialDenseSolver.hpp"
+#include "Teuchos_TimeMonitor.hpp"
 
 #include "BelosBlockGmresSolMgr.hpp"
 #include "BelosLinearProblem.hpp"
@@ -25,6 +26,8 @@
 #include "Thyra_DefaultSpmdVectorSpace.hpp"
 #include "Thyra_DetachedMultiVectorView.hpp"
 #include "Thyra_MultiVectorStdOps.hpp"
+
+#include "Teko_KrylovSurrogateRecorderOp.hpp"
 #endif
 
 namespace Teko {
@@ -318,6 +321,41 @@ std::vector<Report::Candidate> scoreCandidates(const DenseMatrix& C, const Dense
     return rateBefore(x.rate, y.rate);
   });
   return out;
+}
+
+Report buildReport(const RecorderOp& recorder, const Options& options) {
+  static const auto buildTimer =
+      Teuchos::TimeMonitor::getNewCounter("Teko Krylov Surrogate: Build Surrogate");
+  static const auto searchTimer =
+      Teuchos::TimeMonitor::getNewCounter("Teko Krylov Surrogate: Search");
+
+  const BlockedLinearOp A = recorder.getForwardOp();
+  TEUCHOS_TEST_FOR_EXCEPTION(A == Teuchos::null || recorder.numSamples() == 0, std::logic_error,
+                             "Teko::KrylovSurrogate::Impl::buildReport: the recorder has no "
+                             "operator or no samples");
+
+  Report report;
+  report.numSamples = recorder.numSamples();
+  {
+    Teuchos::TimeMonitor monitor(*buildTimer);
+    buildReducedOperator(A, recorder.getSamples(), recorder.getFirstInput(), options.truncationTol,
+                         report);
+  }
+
+  // block (0, 0) is nonzero: buildReducedOperator rejects a zero diagonal block
+  auto comm = tpetraBlock(A, 0, 0)->getRangeMap()->getComm();
+  {
+    Teuchos::TimeMonitor monitor(*searchTimer);
+    report.candidates = scoreCandidates(
+        report.CHat, report.bHat, report.basisSizes,
+        buildCandidates(report.numBlocks, options.orderings, options.candidateCount, options.seed),
+        options.searchTol, *comm);
+  }
+  for (auto& c : report.candidates)
+    c.asHierarchicalGaussSeidel =
+        asHierarchicalGaussSeidel(c.ordering, options.inverseType, options.mergedInverseType);
+  report.searchRanks = comm->getSize();
+  return report;
 }
 
 #endif  // TEKO_HAVE_KRYLOV_SURROGATE

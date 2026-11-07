@@ -67,9 +67,11 @@ inline Teuchos::RCP<const Map> blockMap(int n, Distribution d) {
   return Teuchos::rcp(new Map(n, comm->getRank() == owner ? n : 0, 0, comm));
 }
 
-// The blocked operator, block j's rows distributed as distributions[j]
+// The blocked operator, block j's rows distributed as distributions[j], with
+// every off-diagonal block scaled by offDiagonalScale
 inline Teko::BlockedLinearOp buildBlockedOp(const std::vector<int>& sizes,
-                                            const std::vector<Distribution>& distributions) {
+                                            const std::vector<Distribution>& distributions,
+                                            double offDiagonalScale = 1.0) {
   const int nb = static_cast<int>(sizes.size());
   std::vector<Teuchos::RCP<const Map> > maps(nb);
   std::vector<Teuchos::RCP<const Thyra::VectorSpaceBase<ST> > > spaces(nb);
@@ -92,7 +94,8 @@ inline Teko::BlockedLinearOp buildBlockedOp(const std::vector<int>& sizes,
         std::vector<GO> cols;
         std::vector<ST> vals;
         for (int c = 0; c < sizes[j]; ++c) {
-          const double v = entry(i, j, static_cast<int>(r), c, sizes[j]);
+          const double v =
+              (i == j ? 1.0 : offDiagonalScale) * entry(i, j, static_cast<int>(r), c, sizes[j]);
           if (v != 0.0) {
             cols.push_back(c);
             vals.push_back(v);
@@ -108,6 +111,36 @@ inline Teko::BlockedLinearOp buildBlockedOp(const std::vector<int>& sizes,
   }
   op->endBlockFill();
   return op;
+}
+
+// The same blocks with n rows each, as one monolithic matrix with the blocks'
+// rows interleaved (row nb * r + i is block i's row r), the layout Teko's
+// "Strided Blocking" splits. Rows are distributed evenly, whole nodes per rank.
+inline Teuchos::RCP<CrsMatrix> buildInterleavedMatrix(int n, int nb) {
+  auto comm       = Tpetra::getDefaultComm();
+  const int P     = comm->getSize();
+  const int p     = comm->getRank();
+  const int nodes = n / P + (p < n % P ? 1 : 0);
+  auto map        = Teuchos::rcp(new Map(n * nb, nodes * nb, 0, comm));
+  auto A          = Teuchos::rcp(new CrsMatrix(map, 5 * nb));
+  for (size_t lr = 0; lr < map->getLocalNumElements(); ++lr) {
+    const GO row = map->getGlobalElement(lr);
+    const int r = static_cast<int>(row / nb), i = static_cast<int>(row % nb);
+    std::vector<GO> cols;
+    std::vector<ST> vals;
+    for (int j = 0; j < nb; ++j)
+      for (int c = 0; c < n; ++c) {
+        const double v = entry(i, j, r, c, n);
+        if (v != 0.0) {
+          cols.push_back(static_cast<GO>(nb) * c + j);
+          vals.push_back(v);
+        }
+      }
+    A->insertGlobalValues(row, Teuchos::ArrayView<const GO>(cols),
+                          Teuchos::ArrayView<const ST>(vals));
+  }
+  A->fillComplete();
+  return A;
 }
 
 // Fill a blocked multivector entry by entry from f(block, global row, column)

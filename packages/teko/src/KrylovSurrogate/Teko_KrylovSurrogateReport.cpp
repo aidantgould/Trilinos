@@ -14,14 +14,9 @@
 #include <sstream>
 
 #include "Teuchos_Array.hpp"
-#include "Teuchos_CommHelpers.hpp"
-#include "Teuchos_TimeMonitor.hpp"
 #include "Teuchos_TwoDArray.hpp"
 
-#include "Tpetra_Map.hpp"
-
 #include "Teko_KrylovSurrogateRecorderOp.hpp"
-#include "Teko_KrylovSurrogateReducedOperator.hpp"
 #include "Teko_KrylovSurrogateSearch.hpp"
 
 namespace Teko {
@@ -171,6 +166,12 @@ void Report::print(std::ostream& os, int maxCandidates) const {
        << statusName(candidates[c].status) << std::setw(12) << candidates[c].iterations
        << std::scientific << std::setprecision(3) << candidates[c].rate << std::defaultfloat
        << "\n";
+  const auto failed = std::count_if(candidates.begin(), candidates.end(), [](const Candidate& c) {
+    return c.status == Report::Candidate::SOLVER_ERROR;
+  });
+  if (failed > 0)
+    ss << "  " << failed << " candidates failed with a solver error. Teko's stream shows the "
+       << "messages of those scored on rank 0 only.\n";
   if (!candidates.empty()) {
     if (candidates[0].status != Report::Candidate::CONVERGED)
       ss << "  no candidate converged on the surrogate\n";
@@ -182,16 +183,12 @@ void Report::print(std::ostream& os, int maxCandidates) const {
 
 Teuchos::RCP<Handle> Handle::create() { return Teuchos::rcp(new Handle); }
 
-void Handle::attach(const Teuchos::RCP<const RecorderOp>& recorder, const BlockedLinearOp& A,
-                    const Options& options) {
+void Handle::attach(const Teuchos::RCP<const RecorderOp>& recorder, const Options& options) {
   recorder_ = recorder.create_weak();
-  A_        = A.create_weak();
   options_  = options;
 }
 
-bool Handle::isAttached() const {
-  return !recorder_.is_null() && recorder_.is_valid_ptr() && A_.is_valid_ptr();
-}
+bool Handle::isAttached() const { return !recorder_.is_null() && recorder_.is_valid_ptr(); }
 
 Teuchos::RCP<const RecorderOp> Handle::getRecorder() const {
   return isAttached() ? recorder_.create_strong() : Teuchos::null;
@@ -205,49 +202,20 @@ Report Handle::buildReport() const {
       "report.");
   TEUCHOS_TEST_FOR_EXCEPTION(
       !isAttached(), std::runtime_error,
-      "Teko::KrylovSurrogate::Handle::buildReport: the preconditioner (or its operator) this "
-      "handle was attached to no longer exists. The handle holds only weak references, so ask "
-      "for the report before the preconditioner is destroyed.");
+      "Teko::KrylovSurrogate::Handle::buildReport: the preconditioner this handle was attached "
+      "to no longer exists. The handle holds only a weak reference, so ask for the report "
+      "before the preconditioner is destroyed.");
   // strong for the duration of the build
   const Teuchos::RCP<const RecorderOp> recorder = recorder_.create_strong();
-  const BlockedLinearOp A                       = A_.create_strong();
   TEUCHOS_TEST_FOR_EXCEPTION(
       recorder->numSamples() == 0, std::runtime_error,
       "Teko::KrylovSurrogate::Handle::buildReport: the preconditioner has not been applied since "
       "it was last built, so there are no samples. Solve first.");
 
 #ifdef TEKO_HAVE_KRYLOV_SURROGATE
-  static const auto buildTimer =
-      Teuchos::TimeMonitor::getNewCounter("Teko Krylov Surrogate: Build Surrogate");
-  static const auto searchTimer =
-      Teuchos::TimeMonitor::getNewCounter("Teko Krylov Surrogate: Search");
-
-  Report report;
-  report.numSamples = recorder->numSamples();
-  {
-    Teuchos::TimeMonitor monitor(*buildTimer);
-    Impl::buildReducedOperator(A, recorder->getSamples(), recorder->getFirstInput(),
-                               options_.truncationTol, report);
-  }
-
-  // block (0, 0) is nonzero: buildReducedOperator rejects a zero diagonal block
-  auto comm = Impl::tpetraBlock(A, 0, 0)->getRangeMap()->getComm();
-  {
-    Teuchos::TimeMonitor monitor(*searchTimer);
-    report.candidates =
-        Impl::scoreCandidates(report.CHat, report.bHat, report.basisSizes,
-                              Impl::buildCandidates(report.numBlocks, options_.orderings,
-                                                    options_.candidateCount, options_.seed),
-                              options_.searchTol, *comm);
-  }
-  for (auto& c : report.candidates)
-    c.asHierarchicalGaussSeidel =
-        asHierarchicalGaussSeidel(c.ordering, options_.inverseType, options_.mergedInverseType);
-  report.searchRanks = comm->getSize();
-  return report;
+  return Impl::buildReport(*recorder, options_);
 #else
   // unreachable: without the surrogate the factory throws before attaching
-  (void)A;
   TEUCHOS_TEST_FOR_EXCEPTION(true, std::logic_error,
                              "Teko::KrylovSurrogate::Handle::buildReport: Teko was built without "
                              "the Krylov surrogate");

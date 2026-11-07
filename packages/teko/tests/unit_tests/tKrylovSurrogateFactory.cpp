@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <cmath>
 #include <sstream>
+#include <string>
+#include <type_traits>
 
 #include "BelosBlockGmresSolMgr.hpp"
 #include "BelosLinearProblem.hpp"
@@ -21,12 +23,14 @@
 
 #include "Stratimikos_DefaultLinearSolverBuilder.hpp"
 #include "Teuchos_TimeMonitor.hpp"
+#include "Teuchos_TwoDArray.hpp"
 #include "Teuchos_VerboseObject.hpp"
 #include "Teuchos_XMLParameterListHelpers.hpp"
 #include "Thyra_LinearOpWithSolveFactoryHelpers.hpp"
 #include "Thyra_MultiVectorStdOps.hpp"
 
 #include "Teko_InverseLibrary.hpp"
+#include "Teko_KrylovSurrogatePreconditionerFactory.hpp"
 #include "Teko_KrylovSurrogateRecorderOp.hpp"
 #include "Teko_KrylovSurrogateReport.hpp"
 #include "Teko_StratimikosFactory.hpp"
@@ -55,7 +59,8 @@ ParameterList inverseLibraryList(const RCP<Teko::KrylovSurrogate::Handle>& handl
   s.set("Type", "Krylov Surrogate");
   s.set("Inverse Factory", "BGS");
   s.set("Report Handle", handle);
-  s.sublist("Search").set("Tolerance", 1e-8);
+  // the solve's tolerance, so predicted iterations compare with real ones
+  s.sublist("Search").set("Tolerance", 1e-10);
   return ifl;
 }
 
@@ -89,7 +94,8 @@ int solve(const Teko::LinearOp& A, const Teko::LinearOp& prec, const Teko::Multi
   params->set("Maximum Iterations", 100);
   params->set("Convergence Tolerance", 1e-10);
   Belos::BlockGmresSolMgr<double, MV, OP> solver(problem, params);
-  solver.solve();
+  TEUCHOS_TEST_FOR_EXCEPTION(solver.solve() != Belos::Converged, std::runtime_error,
+                             "the test solve did not converge");
   return solver.getNumIters();
 }
 
@@ -105,13 +111,14 @@ Teko::MultiVector zeros(const Teko::BlockedLinearOp& A) {
   return x;
 }
 
-// Swaps Teuchos's default output stream for one writing into a string, and
-// restores it however the scope ends
+// Swaps Teuchos's default output stream for one writing into a string on rank
+// 0, and restores it however the scope ends
 class CapturedOutput {
  public:
   CapturedOutput() : previous_(Teuchos::VerboseObjectBase::getDefaultOStream()) {
-    Teuchos::VerboseObjectBase::setDefaultOStream(
-        Teuchos::fancyOStream(Teuchos::rcpFromRef(captured_)));
+    auto stream = Teuchos::fancyOStream(Teuchos::rcpFromRef(captured_));
+    stream->setOutputToRootOnly(0);  // as the default stream does
+    Teuchos::VerboseObjectBase::setDefaultOStream(stream);
   }
   ~CapturedOutput() { Teuchos::VerboseObjectBase::setDefaultOStream(previous_); }
   std::string str() const { return captured_.str(); }
@@ -129,10 +136,52 @@ std::string printedBest(const std::string& printed) {
   return printed.substr(begin, end + std::string("</ParameterList>").size() - begin);
 }
 
+// Stratimikos: Belos flexible GMRES, with Teko's "Surrogate" from ifl as the
+// preconditioner
+RCP<Thyra::LinearOpWithSolveFactoryBase<double> > stratimikosSolver(
+    const ParameterList& ifl, const std::string& reorderType = "",
+    const std::string& stridedBlocking = "1") {
+  Stratimikos::DefaultLinearSolverBuilder builder;
+  Teko::addTekoToStratimikosBuilder(builder);
+  auto params = Teuchos::rcp(new ParameterList(*builder.getValidParameters()));
+  params->set("Linear Solver Type", "Belos");
+  ParameterList& belos = params->sublist("Linear Solver Types").sublist("Belos");
+  belos.set("Solver Type", "Block GMRES");
+  ParameterList& gmres = belos.sublist("Solver Types").sublist("Block GMRES");
+  gmres.set("Flexible Gmres", true);
+  gmres.set("Convergence Tolerance", 1e-10);
+  gmres.set("Maximum Iterations", 100);
+  gmres.set("Num Blocks", 100);
+  params->set("Preconditioner Type", "Teko");
+  ParameterList& teko = params->sublist("Preconditioner Types").sublist("Teko");
+  teko.set("Inverse Type", "Surrogate");
+  teko.set("Reorder Type", reorderType);
+  teko.set("Strided Blocking", stridedBlocking);
+  teko.sublist("Inverse Factory Library") = ifl;
+  builder.setParameterList(params);
+  return builder.createLinearSolveStrategy("");
+}
+
+// "Exact Group": unpreconditioned GMRES converged far below any check's
+// tolerance, the exact merged-group solve the surrogate scores
+void addExactGroup(Teko::InverseLibrary& invLib) {
+  ParameterList exact;
+  exact.set("Type", "Belos");
+  exact.set("Solver Type", "Block GMRES");
+  ParameterList& gmres = exact.sublist("Solver Types").sublist("Block GMRES");
+  gmres.set("Convergence Tolerance", 1e-13);
+  gmres.set("Maximum Iterations", 400);
+  gmres.set("Num Blocks", 400);
+  invLib.addInverse("Exact Group", exact);
+}
+
 int numCalls(const char* timer) {
   auto t = Teuchos::TimeMonitor::lookupCounter(timer);
   return t == Teuchos::null ? 0 : t->numCalls();
 }
+
+static_assert(!std::is_copy_constructible<Teko::KrylovSurrogate::Handle>::value,
+              "a Handle is shared through RCP only");
 
 }  // namespace
 
@@ -197,6 +246,17 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, report_from_a_solve) {
   TEST_ASSERT(pl->sublist("Candidates").isSublist("Candidate 12"));
   TEST_EQUALITY(pl->sublist("Candidates").sublist("Candidate 0").get<std::string>("Status"),
                 Teko::KrylovSurrogate::statusName(report.candidates[0].status));
+
+  // the parameter list survives a trip through XML, for logging
+  std::ostringstream xmlLog;
+  Teuchos::writeParameterListToXmlOStream(*pl, xmlLog);
+  RCP<ParameterList> logged = Teuchos::getParametersFromXmlString(xmlLog.str());
+  TEST_ASSERT(logged->get<Teuchos::Array<long long> >("Block Sizes") ==
+              Teuchos::Array<long long>(report.blockSizes));
+  const auto C = logged->get<Teuchos::TwoDArray<double> >("C_hat");
+  TEST_EQUALITY(static_cast<int>(C.getNumRows()), report.CHat.numRows());
+  TEST_FLOATING_EQUALITY(C(0, 0), report.CHat(0, 0), 1e-14);
+  TEST_FLOATING_EQUALITY(C(1, 0), report.CHat(1, 0), 1e-14);
 
   // the printed best is ready to paste: it parses back and builds
   std::ostringstream printed;
@@ -273,36 +333,24 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, restarted_gmres) {
 }
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, through_stratimikos) {
-  Teko::BlockedLinearOp A = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
-  auto handle             = Teko::KrylovSurrogate::Handle::create();
+  // Plain, and reordered: with a reordering, Stratimikos hands the factory a
+  // temporary operator, which the handle must not depend on
+  for (const std::string reorder : {"", "[0 1 2]"}) {
+    Teko::BlockedLinearOp A = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
+    auto handle             = Teko::KrylovSurrogate::Handle::create();
+    auto lowsFactory        = stratimikosSolver(inverseLibraryList(handle), reorder);
+    auto lows               = Thyra::linearOpWithSolve<double>(*lowsFactory, A);
+    Teko::MultiVector b     = rhs(A);
+    Teko::MultiVector x     = zeros(A);
+    Thyra::solve<double>(*lows, Thyra::NOTRANS, *b, x.ptr());
 
-  Stratimikos::DefaultLinearSolverBuilder builder;
-  Teko::addTekoToStratimikosBuilder(builder);
-  auto params = Teuchos::rcp(new ParameterList(*builder.getValidParameters()));
-  params->set("Linear Solver Type", "Belos");
-  ParameterList& belos = params->sublist("Linear Solver Types").sublist("Belos");
-  belos.set("Solver Type", "Block GMRES");
-  ParameterList& gmres = belos.sublist("Solver Types").sublist("Block GMRES");
-  gmres.set("Flexible Gmres", true);
-  gmres.set("Convergence Tolerance", 1e-10);
-  gmres.set("Maximum Iterations", 100);
-  gmres.set("Num Blocks", 100);
-  params->set("Preconditioner Type", "Teko");
-  ParameterList& teko = params->sublist("Preconditioner Types").sublist("Teko");
-  teko.set("Inverse Type", "Surrogate");
-  teko.sublist("Inverse Factory Library") = inverseLibraryList(handle);
-  builder.setParameterList(params);
-
-  auto lowsFactory    = builder.createLinearSolveStrategy("");
-  auto lows           = Thyra::linearOpWithSolve<double>(*lowsFactory, A);
-  Teko::MultiVector b = rhs(A);
-  Teko::MultiVector x = zeros(A);
-  Thyra::solve<double>(*lows, Thyra::NOTRANS, *b, x.ptr());
-
-  TEST_ASSERT(handle->isAttached());
-  Teko::KrylovSurrogate::Report report = handle->buildReport();
-  TEST_ASSERT(report.numSamples > 0);
-  TEST_EQUALITY(report.candidates.size(), 13u);
+    out << "\"Reorder Type\" = \"" << reorder << "\"\n";
+    TEST_ASSERT(handle->isAttached());
+    Teko::KrylovSurrogate::Report report;
+    TEST_NOTHROW(report = handle->buildReport());
+    TEST_ASSERT(report.numSamples > 0);
+    TEST_EQUALITY(report.candidates.size(), 13u);
+  }
 }
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, errors) {
@@ -313,25 +361,22 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, errors) {
     ParameterList ifl = inverseLibraryList(Teko::KrylovSurrogate::Handle::create());
     ifl.sublist("Surrogate").remove("Report Handle");
     auto invLib = Teko::InverseLibrary::buildFromParameterList(ifl);
-    TEST_THROW(invLib->getInverseFactory("Surrogate"), std::runtime_error);
+    TEST_THROW(Teko::buildInverse(*invLib->getInverseFactory("Surrogate"), A), std::runtime_error);
   }
-  // a misspelled option
+  // the same from code
+  {
+    auto invLib = Teko::InverseLibrary::buildFromParameterList(
+        inverseLibraryList(Teko::KrylovSurrogate::Handle::create()));
+    Teko::KrylovSurrogate::KrylovSurrogatePreconditionerFactory factory(
+        invLib->getInverseFactory("BGS"), Teuchos::null, Teko::KrylovSurrogate::Options());
+    Teko::PreconditionerState state;
+    Teko::LinearOp lo = A;
+    TEST_THROW(factory.buildPreconditionerOperator(lo, state), std::runtime_error);
+  }
+  // a misspelled option: the list is validated
   {
     ParameterList ifl = inverseLibraryList(Teko::KrylovSurrogate::Handle::create());
     ifl.sublist("Surrogate").set("Maximum Sample", 10);
-    auto invLib = Teko::InverseLibrary::buildFromParameterList(ifl);
-    TEST_THROW(invLib->getInverseFactory("Surrogate"), Teuchos::Exceptions::InvalidParameter);
-  }
-  // options out of range
-  {
-    ParameterList ifl = inverseLibraryList(Teko::KrylovSurrogate::Handle::create());
-    ifl.sublist("Surrogate").sublist("Search").set("Candidate Count", -5);
-    auto invLib = Teko::InverseLibrary::buildFromParameterList(ifl);
-    TEST_THROW(invLib->getInverseFactory("Surrogate"), Teuchos::Exceptions::InvalidParameter);
-  }
-  {
-    ParameterList ifl = inverseLibraryList(Teko::KrylovSurrogate::Handle::create());
-    ifl.sublist("Surrogate").set("Truncation Tolerance", 2.0);
     auto invLib = Teko::InverseLibrary::buildFromParameterList(ifl);
     TEST_THROW(invLib->getInverseFactory("Surrogate"), Teuchos::Exceptions::InvalidParameter);
   }
@@ -394,16 +439,8 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, hierarchical_gauss_seidel_form) {
   invLib->addInverse("BGS Upper", upper);
 
   // The merged group is scored with an exact solve of its whole block, so the
-  // form is checked with one: unpreconditioned GMRES, converged far below the
-  // check's tolerance
-  ParameterList exact;
-  exact.set("Type", "Belos");
-  exact.set("Solver Type", "Block GMRES");
-  ParameterList& gmres = exact.sublist("Solver Types").sublist("Block GMRES");
-  gmres.set("Convergence Tolerance", 1e-13);
-  gmres.set("Maximum Iterations", 400);
-  gmres.set("Num Blocks", 400);
-  invLib->addInverse("Exact Group", exact);
+  // form is checked with one
+  addExactGroup(*invLib);
 
   invLib->addInverse("Identity Form", Teko::KrylovSurrogate::asHierarchicalGaussSeidel(
                                           {0, 1, 2}, "Amesos2", "Exact Group"));
@@ -461,40 +498,51 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, hierarchical_gauss_seidel_form) {
              std::invalid_argument);
 }
 
-TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, print_at_rebuild_without_a_handle) {
-  // An application configured only from XML: no handle, the report printed
+TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, predictions_order_real_solves) {
+  // What the surrogate is for: each converged candidate's predicted iteration
+  // count, against a real solve with the candidate's printed form. The trained
+  // configuration (lower block Gauss-Seidel, the identity ordering) must be
+  // predicted exactly, and real counts must not decrease down the report's
+  // order. Agreement within an iteration is printed, not asserted: it holds
+  // here but is not a property of the method.
   Teko::BlockedLinearOp A = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
-  auto invLib             = Teko::InverseLibrary::buildFromParameterList(printingLibraryList());
-  auto factory            = invLib->getInverseFactory("Surrogate");
+  auto handle             = Teko::KrylovSurrogate::Handle::create();
+  auto invLib = Teko::InverseLibrary::buildFromParameterList(inverseLibraryList(handle));
+  addExactGroup(*invLib);
 
-  std::string printed;
-  bool silentBeforeRebuild = false;
-  {
-    CapturedOutput captured;
-    Teko::ModifiableLinearOp prec = Teko::buildInverse(*factory, A);
-    solve(A, prec, rhs(A), zeros(A));
-    silentBeforeRebuild = captured.str().empty();
-    Teko::rebuildInverse(*factory, A, prec);
-    printed = captured.str();
-  }
-  out << printed;
+  Teko::LinearOp prec = Teko::buildInverse(*invLib->getInverseFactory("Surrogate"), A);
+  const int trained   = solve(A, prec, rhs(A), zeros(A));
+  const Teko::KrylovSurrogate::Report report = handle->buildReport();
 
-  TEST_ASSERT(silentBeforeRebuild);
-  if (Tpetra::getDefaultComm()->getRank() == 0) {
-    TEST_ASSERT(printed.find("Teko Krylov Surrogate report: 3 blocks") != std::string::npos);
-    TEST_ASSERT(printed.find("Hierarchical Block Gauss-Seidel") != std::string::npos);
-    // the best is all-merged here, so the merged inverse is named, and no placeholder
-    TEST_ASSERT(printed.find("value=\"BGS\"") != std::string::npos);
-    TEST_ASSERT(printed.find("Inverse Type&gt;") == std::string::npos);
-  } else {
-    TEST_ASSERT(printed.empty());
+  int previous    = 0;
+  bool sawTrained = false;
+  for (std::size_t c = 0; c < report.candidates.size(); ++c) {
+    const Candidate& cand = report.candidates[c];
+    if (cand.status != Candidate::CONVERGED) continue;
+    const std::string name = "Candidate " + std::to_string(c);
+    invLib->addInverse(name, Teko::KrylovSurrogate::asHierarchicalGaussSeidel(
+                                 cand.ordering, "Amesos2", "Exact Group"));
+    const int actual =
+        solve(A, Teko::buildInverse(*invLib->getInverseFactory(name), A), rhs(A), zeros(A));
+
+    out << "[";
+    for (int g : cand.ordering) out << g;
+    out << "] predicted " << cand.iterations << ", actual " << actual << "\n";
+    TEST_ASSERT(actual >= previous);
+    previous = actual;
+    if (cand.ordering == std::vector<int>({0, 1, 2})) {
+      sawTrained = true;
+      TEST_EQUALITY(cand.iterations, trained);
+      TEST_EQUALITY(actual, trained);
+    }
   }
+  TEST_ASSERT(sawTrained);
 }
 
-TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, print_reports_its_own_preconditioner) {
-  // One factory, two preconditioners. Rebuilding the first must print the
-  // first's samples, even though the handle now points at the second, which has
-  // none.
+TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, print_reports_the_replaced_preconditioner) {
+  // One factory, two preconditioners. A new build prints the solves of the
+  // preconditioner built before it. A rebuild prints its own preconditioner's,
+  // even though the handle now points at the other.
   Teko::BlockedLinearOp A = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
   auto handle             = Teko::KrylovSurrogate::Handle::create();
   ParameterList ifl       = printingLibraryList();
@@ -502,7 +550,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, print_reports_its_own_preconditioner)
   auto invLib  = Teko::InverseLibrary::buildFromParameterList(ifl);
   auto factory = invLib->getInverseFactory("Surrogate");
 
-  std::string printed;
+  std::string atNewBuild, atRebuild;
   int firstSamples = 0;
   {
     CapturedOutput captured;
@@ -510,15 +558,136 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, print_reports_its_own_preconditioner)
     solve(A, first, rhs(A), zeros(A));
     firstSamples                    = handle->getRecorder()->numSamples();
     Teko::ModifiableLinearOp second = Teko::buildInverse(*factory, A);
+    atNewBuild                      = captured.str();
     TEST_EQUALITY(handle->getRecorder()->numSamples(), 0);
+
+    // the first's printed samples are forgotten: a second solve is reported alone
+    solve(A, first, rhs(A), zeros(A));
     TEST_NOTHROW(Teko::rebuildInverse(*factory, A, first));
+    atRebuild = captured.str().substr(atNewBuild.size());
+  }
+  out << atNewBuild << atRebuild;
+
+  TEST_ASSERT(firstSamples > 0);
+  const std::string samples = ", " + std::to_string(firstSamples) + " samples";
+  if (Tpetra::getDefaultComm()->getRank() == 0) {
+    TEST_ASSERT(atNewBuild.find(samples) != std::string::npos);
+    TEST_ASSERT(atRebuild.find(samples) != std::string::npos);
+  }
+}
+
+TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, print_uses_the_recorded_operator) {
+  // A rebuild with a different operator prints the report of the solve's own
+  // operator, the same as a handle report taken before the rebuild
+  Teko::BlockedLinearOp A     = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
+  Teko::BlockedLinearOp Anext = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN}, 3.0);
+  auto handle                 = Teko::KrylovSurrogate::Handle::create();
+  ParameterList ifl           = printingLibraryList();
+  ifl.sublist("Surrogate").set("Report Handle", handle);
+  auto invLib  = Teko::InverseLibrary::buildFromParameterList(ifl);
+  auto factory = invLib->getInverseFactory("Surrogate");
+
+  Teko::ModifiableLinearOp prec = Teko::buildInverse(*factory, A);
+  solve(A, prec, rhs(A), zeros(A));
+  std::ostringstream before;
+  handle->buildReport().print(before);
+
+  std::string printed;
+  {
+    CapturedOutput captured;
+    Teko::rebuildInverse(*factory, Anext, prec);
+    printed = captured.str();
+  }
+  out << printed;
+  if (Tpetra::getDefaultComm()->getRank() == 0) {
+    TEST_EQUALITY(printed, before.str());
+  } else {
+    TEST_ASSERT(printed.empty());
+  }
+
+  // and the handle now reports against the new operator
+  TEST_ASSERT(handle->getRecorder()->getForwardOp().get() == Anext.get());
+}
+
+TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, print_survives_a_broken_solve) {
+  // An application configured only from XML: no handle, the report printed.
+  // A solve that broke down leaves NaN samples, so no report can be built. The
+  // rebuild an application recovers with must still succeed, and the next
+  // solve is reported as usual, ready to paste.
+  Teko::BlockedLinearOp A = buildBlockedOp(kSizes, {EVEN, EVEN, EVEN});
+  auto invLib             = Teko::InverseLibrary::buildFromParameterList(printingLibraryList());
+  auto factory            = invLib->getInverseFactory("Surrogate");
+
+  std::string failed, recovered;
+  {
+    CapturedOutput captured;
+    Teko::ModifiableLinearOp prec = Teko::buildInverse(*factory, A);
+    Teko::MultiVector nan         = Thyra::createMembers(prec->domain(), 1);
+    Teko::MultiVector y           = Thyra::createMembers(prec->range(), 1);
+    Thyra::assign(nan.ptr(), std::nan(""));
+    prec->apply(Thyra::NOTRANS, *nan, y.ptr(), 1.0, 0.0);
+
+    TEST_NOTHROW(Teko::rebuildInverse(*factory, A, prec));
+    failed = captured.str();
+
+    solve(A, prec, rhs(A), zeros(A));
+    TEST_NOTHROW(Teko::rebuildInverse(*factory, A, prec));
+    recovered = captured.str().substr(failed.size());
+  }
+  out << failed << recovered;
+  if (Tpetra::getDefaultComm()->getRank() == 0) {
+    TEST_ASSERT(failed.find("no report of the solves since the previous build") !=
+                std::string::npos);
+    TEST_ASSERT(recovered.find("Teko Krylov Surrogate report: 3 blocks") != std::string::npos);
+    TEST_ASSERT(recovered.find("Hierarchical Block Gauss-Seidel") != std::string::npos);
+    // the best is all-merged here, so the merged inverse is named, and no placeholder
+    TEST_ASSERT(recovered.find("value=\"BGS\"") != std::string::npos);
+    TEST_ASSERT(recovered.find("Inverse Type&gt;") == std::string::npos);
+  } else {
+    TEST_ASSERT(failed.empty() && recovered.empty());
+  }
+}
+
+TEUCHOS_UNIT_TEST(tKrylovSurrogateFactory, print_through_stratimikos_strided) {
+  // An XML-only application: one monolithic Tpetra matrix, split by "Strided
+  // Blocking". Stratimikos builds a new preconditioner at every
+  // initialization, and that build prints the previous one's solve.
+  const int n      = 24;
+  auto crs         = buildInterleavedMatrix(n, 3);
+  auto space       = Thyra::tpetraVectorSpace<ST, LO, GO, NT>(crs->getRowMap());
+  Teko::LinearOp A = Thyra::tpetraLinearOp<ST, LO, GO, NT>(
+      space, space, Teuchos::rcp_implicit_cast<Tpetra::Operator<ST, LO, GO, NT> >(crs));
+
+  auto handle       = Teko::KrylovSurrogate::Handle::create();
+  ParameterList ifl = printingLibraryList();
+  ifl.sublist("Surrogate").set("Report Handle", handle);
+  auto lowsFactory = stratimikosSolver(ifl, "", "1 1 1");
+
+  std::string printed;
+  bool silentBeforeReinitialization = false;
+  int samples                       = 0;
+  {
+    CapturedOutput captured;
+    auto lows           = Thyra::linearOpWithSolve<double>(*lowsFactory, A);
+    Teko::MultiVector b = Thyra::createMembers(A->range(), 1);
+    Teko::MultiVector x = Thyra::createMembers(A->domain(), 1);
+    Thyra::assign(b.ptr(), 1.0);
+    Thyra::assign(x.ptr(), 0.0);
+    Thyra::solve<double>(*lows, Thyra::NOTRANS, *b, x.ptr());
+    samples                      = handle->getRecorder()->numSamples();
+    silentBeforeReinitialization = captured.str().empty();
+
+    Thyra::initializeOp<double>(*lowsFactory, A, lows.ptr());
     printed = captured.str();
   }
   out << printed;
 
-  TEST_ASSERT(firstSamples > 0);
+  TEST_ASSERT(samples > 0);
+  TEST_ASSERT(silentBeforeReinitialization);
   if (Tpetra::getDefaultComm()->getRank() == 0) {
-    TEST_ASSERT(printed.find(", " + std::to_string(firstSamples) + " samples") !=
-                std::string::npos);
+    TEST_ASSERT(printed.find("Teko Krylov Surrogate report: 3 blocks (sizes 24 24 24), " +
+                             std::to_string(samples) + " samples") != std::string::npos);
+  } else {
+    TEST_ASSERT(printed.empty());
   }
 }

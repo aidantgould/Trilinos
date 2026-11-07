@@ -10,6 +10,7 @@
 #include "Teko_KrylovSurrogatePreconditionerFactory.hpp"
 
 #include <limits>
+#include <sstream>
 #include <string>
 
 #include "Teuchos_Array.hpp"
@@ -37,7 +38,7 @@ Teuchos::RCP<const Teuchos::ParameterEntryValidator> inRange(T lo, T hi) {
 // Every option, with its default, documentation and range. Validating against
 // this makes an unknown, mistyped or out-of-range option an error, so a
 // misspelling does not silently do nothing.
-Teuchos::RCP<const Teuchos::ParameterList> validParameters() {
+Teuchos::RCP<const Teuchos::ParameterList> buildValidParameters() {
   const Options defaults;
   const int big = std::numeric_limits<int>::max();
   auto pl       = Teuchos::rcp(new Teuchos::ParameterList);
@@ -50,23 +51,35 @@ Teuchos::RCP<const Teuchos::ParameterList> validParameters() {
           "Columns of preconditioner output kept, each a full-length vector of memory",
           inRange(1, big));
   pl->set("Truncation Tolerance", defaults.truncationTol,
-          "Singular values kept per block: sigma_k >= tolerance * sigma_1", inRange(0.0, 1.0));
+          "Singular values kept per block: sigma_k >= tolerance * sigma_1. At 0, roundoff "
+          "directions are kept too, and become noise",
+          inRange(0.0, 1.0));
   Teuchos::ParameterList& search = pl->sublist("Search", false, "Candidate scoring");
   search.set("Tolerance", defaults.searchTol,
-             "Relative residual each candidate's surrogate solve stops at", inRange(0.0, 1.0));
+             "Relative residual each candidate's surrogate solve stops at. Set it to the outer "
+             "solve's convergence tolerance, so the predicted iteration counts compare with "
+             "the solve's own",
+             inRange(0.0, 0.5));
   search.set("Candidate Count", defaults.candidateCount, "Number of candidates scored",
              inRange(1, big));
-  search.set("Seed", defaults.seed, "Seed for sampling candidates");
+  search.set("Seed", defaults.seed,
+             "Seed for sampling candidates. It reproduces them within one C++ standard library");
   search.sublist("Orderings", false, "Orderings always scored, each an Array(int)")
       .disableRecursiveValidation();
   Teuchos::ParameterList& report = pl->sublist("Report", false, "What is done with the report");
   report.set("Print", defaults.printReport,
-             "Print a summary to Teko's output stream at each rebuild");
+             "At each build, print a summary of the solves of the preconditioner it replaces "
+             "to Teko's output stream");
   report.set(
       "Inverse Type", defaults.inverseType,
       "Inverse of single-block groups in the reported Hierarchical Block Gauss-Seidel lists");
   report.set("Merged Inverse Type", defaults.mergedInverseType,
              "Inverse of merged groups in those lists; it receives a blocked operator");
+  return pl;
+}
+
+Teuchos::RCP<const Teuchos::ParameterList> validParameters() {
+  static const Teuchos::RCP<const Teuchos::ParameterList> pl = buildValidParameters();
   return pl;
 }
 
@@ -92,8 +105,11 @@ LinearOp KrylovSurrogatePreconditionerFactory::buildPreconditionerOperator(
 #else
   TEUCHOS_TEST_FOR_EXCEPTION(invFactory_ == Teuchos::null, std::runtime_error,
                              "Teko \"Krylov Surrogate\": no \"Inverse Factory\" has been set");
-  TEUCHOS_TEST_FOR_EXCEPTION(handle_ == Teuchos::null, std::runtime_error,
-                             "Teko \"Krylov Surrogate\": no \"Report Handle\" has been set");
+  TEUCHOS_TEST_FOR_EXCEPTION(
+      handle_ == Teuchos::null && !options_.printReport, std::runtime_error,
+      "Teko \"Krylov Surrogate\" needs a \"Report Handle\" (a "
+      "Teuchos::RCP<Teko::KrylovSurrogate::Handle> set from code) or \"Report\" > \"Print\" = "
+      "true. Without either, the report could never be seen.");
 
   BlockedLinearOp blo = toBlockedLinearOp(lo);
   TEUCHOS_TEST_FOR_EXCEPTION(blo == Teuchos::null, std::runtime_error,
@@ -113,6 +129,10 @@ LinearOp KrylovSurrogatePreconditionerFactory::buildPreconditionerOperator(
   ModifiableLinearOp& recorderOp = state.getModifiableOp("krylovSurrogateOp");
   Teuchos::RCP<RecorderOp> recorder;
   if (recorderOp == Teuchos::null) {
+    // A new preconditioner replaces the one this factory built last, as at
+    // every initialization in Stratimikos, so that one's solves are printed
+    if (options_.printReport && !lastRecorder_.is_null() && lastRecorder_.is_valid_ptr())
+      printAndClear(lastRecorder_.create_strong());
     recorder =
         Teuchos::rcp(new RecorderOp(Teko::buildInverse(*invFactory_, lo), options_.maxSamples));
     recorderOp = recorder;
@@ -120,24 +140,37 @@ LinearOp KrylovSurrogatePreconditionerFactory::buildPreconditionerOperator(
     recorder               = Teuchos::rcp_dynamic_cast<RecorderOp>(recorderOp, true);
     ModifiableLinearOp inv = recorder->getModifiableOp();
     Teko::rebuildInverse(*invFactory_, lo, inv);
-    // Report the solves since the previous build before forgetting them. The
-    // report comes from this preconditioner's own recorder, through a private
-    // handle: the shared one may be attached to another preconditioner built
-    // from this factory.
-    if (options_.printReport && recorder->numSamples() > 0) {
-      auto own = Handle::create();
-      own->attach(recorder.getConst(), blo, options_);
-      const Report report = own->buildReport();
-      // Teko's stream prints on rank 0 only, but a user-supplied one may not
-      if (Impl::tpetraBlock(blo, 0, 0)->getRangeMap()->getComm()->getRank() == 0)
-        report.print(*Teko::getOutputStream());
-    }
-    recorder->clearSamples();
+    if (options_.printReport)
+      printAndClear(recorder);
+    else
+      recorder->clearSamples();
   }
 
-  handle_->attach(recorder.getConst(), blo, options_);
+  recorder->setForwardOp(blo);
+  lastRecorder_ = recorder.create_weak();
+  if (handle_ != Teuchos::null) handle_->attach(recorder.getConst(), options_);
   return recorderOp.getConst();
 #endif
+}
+
+void KrylovSurrogatePreconditionerFactory::printAndClear(
+    const Teuchos::RCP<RecorderOp>& recorder) const {
+#ifdef TEKO_HAVE_KRYLOV_SURROGATE
+  if (recorder->numSamples() > 0) {
+    std::ostringstream text;
+    try {
+      Impl::buildReport(*recorder, options_).print(text);
+    } catch (const std::exception& e) {
+      // A report that cannot be built (a solve that broke down, say) must not
+      // abort the build. Catching is safe on every rank because every throw
+      // in buildReport is taken by all ranks alike.
+      text << "Teko \"Krylov Surrogate\": no report of the solves since the previous build: "
+           << e.what() << "\n";
+    }
+    *Teko::getOutputStream() << text.str();
+  }
+#endif
+  recorder->clearSamples();
 }
 
 void KrylovSurrogatePreconditionerFactory::initializeFromParameterList(
@@ -150,14 +183,7 @@ void KrylovSurrogatePreconditionerFactory::initializeFromParameterList(
   options_.inverseType                 = report.get<std::string>("Inverse Type");
   options_.mergedInverseType           = report.get<std::string>("Merged Inverse Type");
 
-  // Without a handle from the application, the factory keeps its own, used for printing
-  handle_ = pl.get<HandlePtr>("Report Handle");
-  TEUCHOS_TEST_FOR_EXCEPTION(
-      handle_ == Teuchos::null && !options_.printReport, std::runtime_error,
-      "Teko \"Krylov Surrogate\" needs a \"Report Handle\" (a "
-      "Teuchos::RCP<Teko::KrylovSurrogate::Handle> set from code) or \"Report\" > \"Print\" = "
-      "true. Without either, the report could never be seen.");
-  if (handle_ == Teuchos::null) handle_ = Handle::create();
+  handle_                   = pl.get<HandlePtr>("Report Handle");
   const std::string invName = pl.get<std::string>("Inverse Factory");
   TEUCHOS_TEST_FOR_EXCEPTION(invName.empty(), std::runtime_error,
                              "Parameter \"Inverse Factory\" is required by Teko \"Krylov "

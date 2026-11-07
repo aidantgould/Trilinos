@@ -62,37 +62,23 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateParallel, bitwise_identical_to_serial) {
   DenseVector b;
   std::vector<int> basisSizes;
   buildSurrogate(C, b, basisSizes);
-
-  // 75 candidates: every ordering of 4 blocks, dealt unevenly over 3 ranks
-  auto candidates = Teko::KrylovSurrogate::Impl::allConfigurations(4);
-  auto parallel =
-      Teko::KrylovSurrogate::Impl::scoreCandidates(C, b, basisSizes, candidates, 1e-10, *comm);
-
   Teuchos::SerialComm<int> serialComm;
-  auto serial =
-      Teko::KrylovSurrogate::Impl::scoreCandidates(C, b, basisSizes, candidates, 1e-10, serialComm);
 
-  TEST_EQUALITY(parallel.size(), candidates.size());
-  TEST_ASSERT(sameCandidates(parallel, serial));
+  // 75 candidates: every ordering of 4 blocks, dealt unevenly over 3 ranks.
+  // Then 2 candidates, fewer than the ranks of the larger runs.
+  const std::vector<std::vector<std::vector<int> > > lists = {
+      Teko::KrylovSurrogate::Impl::allConfigurations(4), {{0, 1, 2, 3}, {0, 0, 0, 0}}};
+  for (const auto& candidates : lists) {
+    auto parallel =
+        Teko::KrylovSurrogate::Impl::scoreCandidates(C, b, basisSizes, candidates, 1e-10, *comm);
+    auto serial = Teko::KrylovSurrogate::Impl::scoreCandidates(C, b, basisSizes, candidates, 1e-10,
+                                                               serialComm);
 
-  // every candidate scored exactly once: each ordering appears once in the result
-  std::set<std::vector<int> > seen;
-  for (const auto& c : parallel) TEST_ASSERT(seen.insert(c.ordering).second);
-}
+    TEST_EQUALITY(parallel.size(), candidates.size());
+    TEST_ASSERT(sameCandidates(parallel, serial));
 
-TEUCHOS_UNIT_TEST(tKrylovSurrogateParallel, more_ranks_than_candidates) {
-  auto comm = Tpetra::getDefaultComm();
-  DenseMatrix C;
-  DenseVector b;
-  std::vector<int> basisSizes;
-  buildSurrogate(C, b, basisSizes);
-
-  std::vector<std::vector<int> > two = {{0, 1, 2, 3}, {0, 0, 0, 0}};
-  auto parallel = Teko::KrylovSurrogate::Impl::scoreCandidates(C, b, basisSizes, two, 1e-10, *comm);
-  Teuchos::SerialComm<int> serialComm;
-  auto serial =
-      Teko::KrylovSurrogate::Impl::scoreCandidates(C, b, basisSizes, two, 1e-10, serialComm);
-
-  TEST_EQUALITY(parallel.size(), 2u);
-  TEST_ASSERT(sameCandidates(parallel, serial));
+    // every candidate scored exactly once: each ordering appears once in the result
+    std::set<std::vector<int> > seen;
+    for (const auto& c : parallel) TEST_ASSERT(seen.insert(c.ordering).second);
+  }
 }

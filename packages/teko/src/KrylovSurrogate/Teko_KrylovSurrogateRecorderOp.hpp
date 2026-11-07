@@ -39,6 +39,10 @@ namespace KrylovSurrogate {
  *   restart. Those outputs are recorded too: they are valid samples of the
  *   diagonal-block inverses, though not Krylov vectors.
  *
+ * The recorder also holds the blocked operator \f$A\f$ the samples are recorded
+ * against (setForwardOp), so a report pairs the samples with the operator they
+ * came from, even when the caller's operator object was a temporary.
+ *
  * The recorded state is mutable and written in a const apply, so the operator is
  * not thread-safe, as Thyra operators are generally not.
  */
@@ -59,8 +63,15 @@ class RecorderOp : public ImplicitLinearOp {
   //! The wrapped preconditioner, for rebuilding it in place
   ModifiableLinearOp getModifiableOp() const { return prec_; }
 
+  //! The operator the samples are recorded against, held until replaced
+  void setForwardOp(const BlockedLinearOp& A) { A_ = A; }
+
+  //! The operator the samples are recorded against (null if none was set)
+  BlockedLinearOp getForwardOp() const { return A_; }
+
   //! Forget every recorded sample and the first input. The store stays
-  //! allocated, for the next solve after a rebuild.
+  //! allocated for the next solve after a rebuild, unless the preconditioner's
+  //! range has changed.
   void clearSamples();
 
   //! Number of recorded columns
@@ -81,6 +92,7 @@ class RecorderOp : public ImplicitLinearOp {
   static constexpr int kInitialCapacity = 16;
 
   ModifiableLinearOp prec_;
+  BlockedLinearOp A_;
   int maxSamples_;
 
   mutable MultiVector store_;

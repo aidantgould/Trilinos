@@ -28,7 +28,7 @@ RecorderOp::RecorderOp(const ModifiableLinearOp& prec, int maxSamples)
 
 void RecorderOp::implicitApply(const MultiVector& x, MultiVector& y, const double alpha,
                                const double beta) const {
-  // x arrives const-only, so take a const view of it
+  // a const view: x is an input
   const Teuchos::RCP<const Thyra::MultiVectorBase<double> > cx = x;
   if (firstInput_ == Teuchos::null && cx->domain()->dim() > 0)
     firstInput_ = cx->subView(Teuchos::Range1D(0, 0))->clone_mv();
@@ -80,6 +80,10 @@ void RecorderOp::record(const MultiVector& z) const {
 void RecorderOp::clearSamples() {
   count_      = 0;
   firstInput_ = Teuchos::null;
+  // A rebuild can change the preconditioner's spaces (repartitioning), and a
+  // store on the old ones must not be reused
+  if (store_ != Teuchos::null && !store_->range()->isCompatible(*prec_->range()))
+    store_ = Teuchos::null;
 }
 
 MultiVector RecorderOp::getSamples() const {

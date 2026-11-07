@@ -146,11 +146,11 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, any_distribution) {
   compare(build(sizes, {EVEN, EVEN, ALL_ON_ONE_RANK}, kSamples), ref, out, success);
 }
 
-TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, resolves_below_gram_floor) {
+TEUCHOS_UNIT_TEST(tKrylovSurrogateReducedOperator, keeps_small_singular_values) {
   // One diagonal block D, with Z = D^{-1} U diag(sigma) for orthonormal sine
-  // columns U, so V_tilde = A Z has singular values sigma exactly. With
-  // sigma_c = 10^{-1.1 c}, ten lie above the 1e-10 cut; the Gram route could
-  // resolve only the seven above 4.2e-8.
+  // columns U, so V_tilde = A Z has singular values sigma exactly. Every
+  // direction with sigma_k >= 1e-10 sigma_1 is kept, however small: with
+  // sigma_c = 10^{-1.1 c}, that is ten of the twelve.
   const int n = 40, m = 12;
   auto comm  = Tpetra::getDefaultComm();
   auto map   = Teuchos::rcp(new Map(n, 0, comm));

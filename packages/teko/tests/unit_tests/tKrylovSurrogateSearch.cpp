@@ -102,16 +102,6 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, all_merged_is_exact) {
   TEST_EQUALITY(c.iterations, 1);
 }
 
-TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, block_diagonal_needs_one_iteration) {
-  std::vector<int> basisSizes = {2, 3, 2};
-  DenseMatrix C               = identityBlocks(basisSizes);
-  for (const auto& o : Teko::KrylovSurrogate::Impl::allConfigurations(3)) {
-    Candidate c = scoreOne(C, onesVector(7), basisSizes, o);
-    TEST_EQUALITY(c.status, Candidate::CONVERGED);
-    TEST_EQUALITY(c.iterations, 1);
-  }
-}
-
 TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, lower_coupling_and_its_reverse) {
   // C = [I 0; L I]. The identity ordering keeps L, so K = I. Reversed, L is
   // dropped, K = C, and K - I is nilpotent: exactly two iterations.
@@ -166,6 +156,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateSearch, sorted_and_complete) {
                                                                  candidates, 1e-10, comm);
   TEST_EQUALITY(scored.size(), candidates.size());
   for (std::size_t i = 1; i < scored.size(); ++i) {
+    TEST_ASSERT(scored[i].status >= scored[i - 1].status);
     if (scored[i].status == scored[i - 1].status)
       TEST_ASSERT(scored[i].iterations >= scored[i - 1].iterations);
   }

@@ -41,7 +41,7 @@ typedef Teuchos::RCP<const Tpetra::Operator<ST, LO, GO, NT> > TpetraOp;
 // right-hand factor of a local GEMM, or the result of a reduction.
 Teuchos::RCP<TpetraMV> localMV(const DenseMatrix& M,
                                const Teuchos::RCP<const Teuchos::Comm<int> >& comm) {
-  auto map = Teuchos::rcp(new TpetraMap(M.numRows(), 0, comm, Tpetra::LocallyReplicated));
+  auto map = Tpetra::createLocalMapWithNode<LO, GO, NT>(M.numRows(), comm);
   return Teuchos::rcp(
       new TpetraMV(map, Teuchos::ArrayView<const ST>(M.values(), M.stride() * M.numCols()),
                    M.stride(), M.numCols()));
@@ -52,7 +52,7 @@ Teuchos::RCP<TpetraMV> localMV(const DenseMatrix& M,
 DenseMatrix transposeProduct(const TpetraMV& A, const TpetraMV& B) {
   const int k = static_cast<int>(A.getNumVectors());
   const int n = static_cast<int>(B.getNumVectors());
-  auto map    = Teuchos::rcp(new TpetraMap(k, 0, A.getMap()->getComm(), Tpetra::LocallyReplicated));
+  auto map    = Tpetra::createLocalMapWithNode<LO, GO, NT>(k, A.getMap()->getComm());
   TpetraMV C(map, n);
   C.multiply(Teuchos::TRANS, Teuchos::NO_TRANS, 1.0, A, B, 0.0);
 
@@ -236,17 +236,17 @@ void buildReducedOperator(const BlockedLinearOp& A, const MultiVector& Z, const 
       blocks[i][j]->apply(*Y[j], AY);
       DenseMatrix Cij = transposeProduct(*Qhat[i], AY);
 
-      double deviation = 0.0;
-      for (int c = 0; c < report.basisSizes[j]; ++c) {
-        for (int rr = 0; rr < report.basisSizes[i]; ++rr) {
-          if (i == j) {
-            deviation  = std::max(deviation, std::abs(Cij(rr, c) - (rr == c ? 1.0 : 0.0)));
-            Cij(rr, c) = (rr == c ? 1.0 : 0.0);
-          }
-          report.CHat(offset[i] + rr, offset[j] + c) = Cij(rr, c);
-        }
+      if (i == j) {
+        double deviation = 0.0;
+        for (int c = 0; c < Cij.numCols(); ++c)
+          for (int rr = 0; rr < Cij.numRows(); ++rr)
+            deviation = std::max(deviation, std::abs(Cij(rr, c) - (rr == c ? 1.0 : 0.0)));
+        report.diagonalDeviations[i] = deviation;
+        Cij.putScalar(0.0);
+        for (int k = 0; k < Cij.numRows(); ++k) Cij(k, k) = 1.0;
       }
-      if (i == j) report.diagonalDeviations[i] = deviation;
+      DenseMatrix(Teuchos::View, report.CHat, Cij.numRows(), Cij.numCols(), offset[i], offset[j])
+          .assign(Cij);
     }
   }
 

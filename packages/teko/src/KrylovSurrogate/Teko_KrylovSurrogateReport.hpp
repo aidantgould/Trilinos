@@ -161,10 +161,16 @@ std::string statusName(Report::Candidate::Status status);
  * applied to, which in right-preconditioned GMRES is the initial residual, so
  * warm-started solves are handled as such.
  *
- * The handle holds only weak references to the preconditioner and its
- * operator, so the parameter list (and every copy of it) does not keep the
- * recorded samples alive. Ask for the report while the preconditioner still
- * exists: afterwards buildReport() throws.
+ * The handle holds only a weak reference to the preconditioner's recorder, so
+ * the parameter list (and every copy of it) does not keep the recorded samples
+ * alive. Ask for the report while the preconditioner still exists: afterwards
+ * buildReport() throws. The recorder keeps the operator it was built or
+ * rebuilt with, so a temporary operator (Stratimikos's "Reorder Type", or a
+ * nested inverse) is no obstacle.
+ *
+ * The report uses the operator's values as they are when it is built. An
+ * operator refilled in place since the solve gives a report of the new values
+ * on the old samples.
  *
  * A parameter list holding a handle can be written to XML, but the handle is
  * written as a pointer, and reading that file back throws. Remove "Report
@@ -184,6 +190,9 @@ class Handle {
   //! Whether a preconditioner has been attached and still exists
   bool isAttached() const;
 
+  Handle(const Handle&)            = delete;
+  Handle& operator=(const Handle&) = delete;
+
   //! The recorder of the attached preconditioner (null if none), a diagnostic
   Teuchos::RCP<const RecorderOp> getRecorder() const;
 
@@ -193,11 +202,9 @@ class Handle {
 
   // Called by the factory on every build
   friend class KrylovSurrogatePreconditionerFactory;
-  void attach(const Teuchos::RCP<const RecorderOp>& recorder, const BlockedLinearOp& A,
-              const Options& options);
+  void attach(const Teuchos::RCP<const RecorderOp>& recorder, const Options& options);
 
   Teuchos::RCP<const RecorderOp> recorder_;  // weak
-  BlockedLinearOp A_;                        // weak
   Options options_;
 };
 

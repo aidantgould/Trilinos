@@ -76,16 +76,15 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, records_outputs_in_order) {
   // the recorder changes nothing
   Teko::MultiVector ref1 = Thyra::createMembers(M->range(), 2);
   M->apply(Thyra::NOTRANS, *x1, ref1.ptr(), 1.0, 0.0);
-  TEST_FLOATING_EQUALITY(maxDiff(y1, ref1) + 1.0, 1.0, 1e-15);
+  TEST_COMPARE(maxDiff(y1, ref1), <=, 1e-15);
 
   TEST_EQUALITY(rec.numSamples(), 3);
   Teko::MultiVector Z = rec.getSamples();
-  TEST_FLOATING_EQUALITY(maxDiff(Z->subView(Teuchos::Range1D(0, 1)), y1) + 1.0, 1.0, 1e-15);
-  TEST_FLOATING_EQUALITY(maxDiff(Z->subView(Teuchos::Range1D(2, 2)), y2) + 1.0, 1.0, 1e-15);
+  TEST_COMPARE(maxDiff(Z->subView(Teuchos::Range1D(0, 1)), y1), <=, 1e-15);
+  TEST_COMPARE(maxDiff(Z->subView(Teuchos::Range1D(2, 2)), y2), <=, 1e-15);
 
   // the first input is the first column of the first apply
-  TEST_FLOATING_EQUALITY(maxDiff(rec.getFirstInput(), x1->subView(Teuchos::Range1D(0, 0))) + 1.0,
-                         1.0, 1e-15);
+  TEST_COMPARE(maxDiff(rec.getFirstInput(), x1->subView(Teuchos::Range1D(0, 0))), <=, 1e-15);
 }
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, cap_and_clear) {
@@ -106,7 +105,7 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, cap_and_clear) {
   Teko::MultiVector x2 = filled(M, 1, 4);
   rec.apply(Thyra::NOTRANS, *x2, y->subView(Teuchos::Range1D(0, 0)).ptr(), 1.0, 0.0);
   TEST_EQUALITY(rec.numSamples(), 1);
-  TEST_FLOATING_EQUALITY(maxDiff(rec.getFirstInput(), x2) + 1.0, 1.0, 1e-15);
+  TEST_COMPARE(maxDiff(rec.getFirstInput(), x2), <=, 1e-15);
 }
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, alpha_and_beta) {
@@ -125,8 +124,8 @@ TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, alpha_and_beta) {
   Teko::MultiVector expect = y0->clone_mv();
   Thyra::scale(3.0, expect.ptr());
   Thyra::update(2.0, *Mx, expect.ptr());
-  TEST_FLOATING_EQUALITY(maxDiff(y, expect) + 1.0, 1.0, 1e-14);
-  TEST_FLOATING_EQUALITY(maxDiff(rec.getSamples(), Mx) + 1.0, 1.0, 1e-15);
+  TEST_COMPARE(maxDiff(y, expect), <=, 1e-14);
+  TEST_COMPARE(maxDiff(rec.getSamples(), Mx), <=, 1e-15);
 }
 
 TEUCHOS_UNIT_TEST(tKrylovSurrogateRecorderOp, store_grows_and_keeps_every_column) {

@@ -43,19 +43,28 @@ namespace KrylovSurrogate {
             report needs about three times the samples' memory again, at peak.
             Default 100. -->
        <Parameter name="Maximum Samples" type="int" value="100"/>
-       <!-- Optional. Singular values kept per block, relative. Default 1e-10. -->
+       <!-- Optional. Singular values kept per block, relative. Default 1e-10.
+            At 0, roundoff directions are kept too, and the surrogate is noise
+            along them. -->
        <Parameter name="Truncation Tolerance" type="double" value="1e-10"/>
        <ParameterList name="Search">                       <!-- optional -->
+         <!-- The relative residual each candidate's surrogate solve stops at.
+              Set it to the outer solve's convergence tolerance, or the
+              predicted iteration counts do not compare with the solve's own.
+              Default 1e-8. -->
          <Parameter name="Tolerance" type="double" value="1e-8"/>
          <Parameter name="Candidate Count" type="int" value="100"/>
+         <!-- A seed reproduces the sampled candidates within one C++
+              standard library, not across them. -->
          <Parameter name="Seed" type="int" value="0"/>
          <ParameterList name="Orderings">                 <!-- always scored -->
            <Parameter name="merge 0 and 1" type="Array(int)" value="{0,0,1}"/>
          </ParameterList>
        </ParameterList>
        <ParameterList name="Report">                       <!-- optional -->
-         <!-- Print a summary to Teko's output stream at each rebuild, covering
-              the solves since the previous build. Default false. -->
+         <!-- Print, at each build, a summary of the solves of the
+              preconditioner that build replaces, to Teko's output stream.
+              Default false. -->
          <Parameter name="Print" type="bool" value="false"/>
          <!-- Inverses written into each candidate's Hierarchical Block
               Gauss-Seidel list: single-block groups, and merged groups (which
@@ -72,11 +81,23 @@ namespace KrylovSurrogate {
  * code: see Handle) gives the report to the application. One of it and
  * "Report" > "Print" is required, or the report could never be seen.
  *
- * With "Print" on, a rebuild first builds and prints the report of the solves
- * since the previous build, so it is collective over the operator's
- * communicator, like Handle::buildReport, and runs the search. Nothing
- * rebuilds after the last solve of a run, so that solve is never printed: use
- * a handle to see it.
+ * With "Print" on, a build first prints the report of the solves of the
+ * preconditioner it replaces: at a rebuild, that preconditioner's own; at a
+ * new build, those of the preconditioner this factory built or rebuilt last,
+ * if it still exists. (Stratimikos builds a new preconditioner at every
+ * initialization in its "Strided Blocking" route, so the second covers it.)
+ * Printed samples are forgotten, so nothing is printed twice. The second rule
+ * assumes one factory per system: a factory shared by preconditioners of two
+ * systems prints, and forgets, one system's samples when the other's is built. A report that cannot
+ be built is printed as its
+ * error message, and the build goes on. The print is collective over the
+ * operator's communicator, like Handle::buildReport, and runs the search.
+ * Nothing is built after the last solve of a run, so that solve is never
+ * printed: use a handle to see it.
+ *
+ * A report uses the operator the samples were recorded against, with its
+ * values as they are when the report is built: an operator refilled in place
+ * gives the new values on the old samples.
  */
 class KrylovSurrogatePreconditionerFactory : public virtual Teko::PreconditionerFactory {
  public:
@@ -99,9 +120,13 @@ class KrylovSurrogatePreconditionerFactory : public virtual Teko::Preconditioner
   virtual bool updateRequestedParameters(const Teuchos::ParameterList& pl);
 
  private:
+  // Print the report of the recorder's samples, if it has any, then forget them
+  void printAndClear(const Teuchos::RCP<RecorderOp>& recorder) const;
+
   Teuchos::RCP<Teko::InverseFactory> invFactory_;
-  Teuchos::RCP<Handle> handle_;
+  Teuchos::RCP<Handle> handle_;  // may be null when "Print" is on
   Options options_;
+  mutable Teuchos::RCP<RecorderOp> lastRecorder_;  // weak, the last built or rebuilt
 };
 
 }  // namespace KrylovSurrogate

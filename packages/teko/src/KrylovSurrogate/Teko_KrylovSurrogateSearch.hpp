@@ -81,6 +81,14 @@ std::vector<Report::Candidate> scoreCandidates(const DenseMatrix& C, const Dense
                                                const std::vector<int>& basisSizes,
                                                const std::vector<std::vector<int> >& candidates,
                                                double tol, const Teuchos::Comm<int>& comm);
+
+/** \brief The report of a recorder's samples, against the operator it holds:
+ *         the reduced operator, then the search.
+ *
+ * The recorder must have samples and an operator. Collective over the
+ * operator's communicator; every throw is taken by every rank alike.
+ */
+Report buildReport(const RecorderOp& recorder, const Options& options);
 #endif
 
 }  // namespace Impl
